@@ -177,9 +177,10 @@ def add_model_params(writer, config, name, file_type):
     writer.add_file_type(file_type)
     writer.add_sliding_window(config["yoco_window_size"])
 
-    # MoE metadata
-    writer.add_uint32("bitnet.moe_expert_num", config["moe_expert_num"])
-    writer.add_uint32("bitnet.moe_top_k", config["moe_top_k"])
+    # MoE metadata - use standard llama.cpp KV keys
+    writer.add_uint32("bitnet.expert_count", config["moe_expert_num"])
+    writer.add_uint32("bitnet.expert_used_count", config["moe_top_k"])
+    # Custom BitNet MoE keys
     writer.add_uint32("bitnet.moe_ffn_dim", config["moe_ffn_dim"])
     writer.add_uint32("bitnet.d_shared_expert", config["d_shared_expert"])
     writer.add_uint32("bitnet.moe_latent_dim", config["moe_latent_dim"])
@@ -200,17 +201,17 @@ def generate_self_layer_attn_tensors(config):
     kv_dim = n_kv_heads * head_dim
 
     tensors = {
-        "input_layernorm.weight": (hidden,),
-        "self_attn.q_proj.weight": (q_dim, hidden),
-        "self_attn.k_proj.weight": (kv_dim, hidden),
-        "self_attn.v_proj.weight": (kv_dim, hidden),
-        "self_attn.o_proj.weight": (hidden, n_heads * head_dim),
+        "attn_norm.weight": (hidden,),
+        "attn_q.weight": (q_dim, hidden),
+        "attn_k.weight": (kv_dim, hidden),
+        "attn_v.weight": (kv_dim, hidden),
+        "attn_output.weight": (hidden, n_heads * head_dim),
         # diff_v3 gate: per 2*n_heads scalars -> linear (2*n_heads, hidden)
-        "self_attn.gate_proj.weight": (2 * n_heads, hidden),
+        "attn_gate.weight": (2 * n_heads, hidden),
         # qk_rms_clip norms
-        "self_attn.q_norm.weight": (q_dim,),
-        "self_attn.k_norm.weight": (kv_dim,),
-        "post_attention_layernorm.weight": (hidden,),
+        "attn_q_norm.weight": (q_dim,),
+        "attn_k_norm.weight": (kv_dim,),
+        "ffn_norm.weight": (hidden,),
     }
     return tensors
 
@@ -219,19 +220,18 @@ def generate_cross_layer_attn_tensors(config):
     """Cross-decoder attention tensors (diff_v3: q has 2x cross_heads)."""
     hidden = config["hidden_size"]
     n_heads_cross = config["num_cross_attention_heads"]
-    n_cross_kv_heads = config["num_cross_key_value_heads"]
     head_dim = config["head_dim"]
 
     q_heads = n_heads_cross * 2
     q_dim = q_heads * head_dim
 
     tensors = {
-        "input_layernorm.weight": (hidden,),
-        "self_attn.q_proj.weight": (q_dim, hidden),
-        "self_attn.o_proj.weight": (hidden, n_heads_cross * head_dim),
-        "self_attn.gate_proj.weight": (2 * n_heads_cross, hidden),
-        "self_attn.q_norm.weight": (q_dim,),
-        "post_attention_layernorm.weight": (hidden,),
+        "attn_norm.weight": (hidden,),
+        "attn_q.weight": (q_dim, hidden),
+        "attn_output.weight": (hidden, n_heads_cross * head_dim),
+        "attn_gate.weight": (2 * n_heads_cross, hidden),
+        "attn_q_norm.weight": (q_dim,),
+        "ffn_norm.weight": (hidden,),
     }
     return tensors
 
@@ -248,26 +248,26 @@ def generate_moe_tensors(config):
 
     tensors = {
         # Router
-        "mlp.gate.weight": (n_experts, hidden),
-        # Packed expert weights: w13 = [gate_proj | up_proj], w2 = down_proj
-        "mlp.w13.weight": (n_experts, 2 * ffn_dim, expert_input_dim),
-        "mlp.w2.weight": (n_experts, expert_input_dim, ffn_dim),
+        "ffn_gate_inp.weight": (n_experts, hidden),
+        # Packed expert weights: gate_up_exps = [gate_proj | up_proj], down_exps = down_proj
+        "ffn_gate_up_exps.weight": (n_experts, 2 * ffn_dim, expert_input_dim),
+        "ffn_down_exps.weight": (n_experts, expert_input_dim, ffn_dim),
     }
 
     # Latent projections (only if moe_latent_dim > 0)
     if latent_dim > 0:
-        tensors["mlp.fc1_latent_proj.weight"] = (latent_dim, hidden)
-        tensors["mlp.fc2_latent_proj.weight"] = (hidden, latent_dim)
+        tensors["ffn_latent_down.weight"] = (latent_dim, hidden)
+        tensors["ffn_latent_up.weight"] = (hidden, latent_dim)
         if config["moe_latent_norm"]:
-            tensors["mlp.fc1_latent_norm.weight"] = (latent_dim,)
-            tensors["mlp.fc2_latent_norm.weight"] = (latent_dim,)
+            tensors["ffn_latent_down_norm.weight"] = (latent_dim,)
+            tensors["ffn_latent_up_norm.weight"] = (latent_dim,)
 
     # Shared expert (SwiGLU FFN)
     if d_shared > 0:
-        tensors["mlp.shared.gate_proj.weight"] = (d_shared, hidden)
-        tensors["mlp.shared.up_proj.weight"] = (d_shared, hidden)
-        tensors["mlp.shared.down_proj.weight"] = (hidden, d_shared)
-        tensors["mlp.shared_gate.weight"] = (1, hidden)
+        tensors["ffn_gate_shexp.weight"] = (d_shared, hidden)
+        tensors["ffn_up_shexp.weight"] = (d_shared, hidden)
+        tensors["ffn_down_shexp.weight"] = (hidden, d_shared)
+        tensors["ffn_gate_inp_shexp.weight"] = (1, hidden)
 
     return tensors
 
@@ -280,10 +280,10 @@ def generate_shared_cross_kv_tensors(config):
     kv_dim = n_cross_kv_heads * head_dim
 
     return {
-        "yoco_norm.weight": (hidden,),
-        "k_proj.weight": (kv_dim, hidden),
-        "v_proj.weight": (kv_dim, hidden),
-        "k_norm.weight": (kv_dim,),
+        "yoco_cross_kv_norm.weight": (hidden,),
+        "yoco_cross_k.weight": (kv_dim, hidden),
+        "yoco_cross_v.weight": (kv_dim, hidden),
+        "yoco_cross_k_norm.weight": (kv_dim,),
     }
 
 
@@ -314,6 +314,7 @@ def _iter_all_tensor_names_and_shapes(config, tensor_map):
 
     This defines the single authoritative order used by both
     _add_all_tensor_info (phase 1) and _write_all_tensor_data (phase 2).
+    Uses standard llama.cpp blk.N.* naming convention directly.
     """
     hidden = config["hidden_size"]
     n_self = config["num_self_layers"]
@@ -324,30 +325,23 @@ def _iter_all_tensor_names_and_shapes(config, tensor_map):
     moe_template = generate_moe_tensors(config)
     cross_attn_template = generate_cross_layer_attn_tensors(config)
 
-    def _map(tensor_name):
-        mapped = tensor_map.get_name(tensor_name, try_suffixes=(".weight",))
-        if mapped is None:
-            mapped = tensor_name.replace("model.", "")
-        return mapped
-
     # --- Embedding ---
-    yield (tensor_map.get_name("model.embed_tokens.weight", try_suffixes=(".weight",)),
-           (vocab, hidden))
+    yield ("token_embd.weight", (vocab, hidden))
 
     # --- Self-decoder layers ---
     for sl in range(n_self):
         for suffix, shape in self_attn_template.items():
-            yield (_map(f"model.layers.{sl}.{suffix}"), shape)
+            yield (f"blk.{sl}.{suffix}", shape)
         for suffix, shape in moe_template.items():
-            yield (_map(f"model.layers.{sl}.{suffix}"), shape)
+            yield (f"blk.{sl}.{suffix}", shape)
 
     # --- Cross-decoder layers ---
     for cl in range(n_cross):
         i = n_self + cl
         for suffix, shape in cross_attn_template.items():
-            yield (_map(f"model.layers.{i}.{suffix}"), shape)
+            yield (f"blk.{i}.{suffix}", shape)
         for suffix, shape in moe_template.items():
-            yield (_map(f"model.layers.{i}.{suffix}"), shape)
+            yield (f"blk.{i}.{suffix}", shape)
 
     # --- Shared YOCO cross KV tensors ---
     for tname, shape in generate_shared_cross_kv_tensors(config).items():
@@ -359,8 +353,7 @@ def _iter_all_tensor_names_and_shapes(config, tensor_map):
             yield (tname, shape)
 
     # --- Final norm ---
-    yield (tensor_map.get_name("model.norm.weight", try_suffixes=(".weight",)),
-           (hidden,))
+    yield ("output_norm.weight", (hidden,))
 
 
 def _add_all_tensor_info(writer, config, tensor_map, dtype=np.float32):
