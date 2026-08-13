@@ -304,105 +304,167 @@ def weight_quant_ternary(weight: np.ndarray) -> np.ndarray:
     return np.clip(np.round(w * s), -1, 1) / s
 
 
-def _write_all_tensors(writer, config, tensor_map, dtype=np.float32):
-    """Write all model tensors (embedding, layers, shared KV, embproj, norm) into a GGUF writer."""
+def _get_tensor_dtype(dtype):
+    """Get numpy dtype object from dtype parameter."""
+    return np.dtype(dtype)
+
+
+def _iter_all_tensor_names_and_shapes(config, tensor_map):
+    """Yield (mapped_name, shape) for every tensor in canonical order.
+
+    This defines the single authoritative order used by both
+    _add_all_tensor_info (phase 1) and _write_all_tensor_data (phase 2).
+    """
     hidden = config["hidden_size"]
     n_self = config["num_self_layers"]
     n_cross = config["num_cross_layers"]
     vocab = config["vocab_size"]
 
-    quant_names = {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"}
-
-    def _make_tensor(shape):
-        data = np.random.randn(*shape).astype(np.float32)
-        return data
-
-    def _finalize(data):
-        """Apply ternary quant in f32, then cast to target dtype."""
-        return data.astype(dtype)
-
-    # --- Embedding ---
-    data = _finalize(_make_tensor((vocab, hidden)))
-    name = tensor_map.get_name("model.embed_tokens.weight", try_suffixes=(".weight",))
-    writer.add_tensor(name, data)
-
-    # --- Self-decoder layers (0 .. n_self-1) ---
     self_attn_template = generate_self_layer_attn_tensors(config)
     moe_template = generate_moe_tensors(config)
-
-    for sl in range(n_self):
-        # Attention
-        for suffix, shape in self_attn_template.items():
-            tensor_name = f"model.layers.{sl}.{suffix}"
-            data = _make_tensor(shape)
-            should_quant = any(qn in suffix for qn in quant_names)
-            if should_quant and len(shape) == 2:
-                data = weight_quant_ternary(data)
-            mapped = tensor_map.get_name(tensor_name, try_suffixes=(".weight",))
-            if mapped is None:
-                mapped = tensor_name.replace("model.", "")
-            writer.add_tensor(mapped, _finalize(data))
-
-        # MoE FFN
-        for suffix, shape in moe_template.items():
-            tensor_name = f"model.layers.{sl}.{suffix}"
-            data = _make_tensor(shape)
-            should_quant = any(qn in suffix for qn in quant_names)
-            if should_quant and len(shape) == 2:
-                data = weight_quant_ternary(data)
-            mapped = tensor_map.get_name(tensor_name, try_suffixes=(".weight",))
-            if mapped is None:
-                mapped = tensor_name.replace("model.", "")
-            writer.add_tensor(mapped, _finalize(data))
-
-    # --- Cross-decoder layers (n_self .. n_layers-1) ---
     cross_attn_template = generate_cross_layer_attn_tensors(config)
 
+    def _map(tensor_name):
+        mapped = tensor_map.get_name(tensor_name, try_suffixes=(".weight",))
+        if mapped is None:
+            mapped = tensor_name.replace("model.", "")
+        return mapped
+
+    # --- Embedding ---
+    yield (tensor_map.get_name("model.embed_tokens.weight", try_suffixes=(".weight",)),
+           (vocab, hidden))
+
+    # --- Self-decoder layers ---
+    for sl in range(n_self):
+        for suffix, shape in self_attn_template.items():
+            yield (_map(f"model.layers.{sl}.{suffix}"), shape)
+        for suffix, shape in moe_template.items():
+            yield (_map(f"model.layers.{sl}.{suffix}"), shape)
+
+    # --- Cross-decoder layers ---
     for cl in range(n_cross):
         i = n_self + cl
-        # Cross attention (no K/V proj - uses shared YOCO KV)
         for suffix, shape in cross_attn_template.items():
-            tensor_name = f"model.layers.{i}.{suffix}"
-            data = _make_tensor(shape)
-            should_quant = any(qn in suffix for qn in quant_names)
-            if should_quant and len(shape) == 2:
-                data = weight_quant_ternary(data)
-            mapped = tensor_map.get_name(tensor_name, try_suffixes=(".weight",))
-            if mapped is None:
-                mapped = tensor_name.replace("model.", "")
-            writer.add_tensor(mapped, _finalize(data))
-
-        # MoE FFN
+            yield (_map(f"model.layers.{i}.{suffix}"), shape)
         for suffix, shape in moe_template.items():
-            tensor_name = f"model.layers.{i}.{suffix}"
-            data = _make_tensor(shape)
-            should_quant = any(qn in suffix for qn in quant_names)
-            if should_quant and len(shape) == 2:
-                data = weight_quant_ternary(data)
-            mapped = tensor_map.get_name(tensor_name, try_suffixes=(".weight",))
-            if mapped is None:
-                mapped = tensor_name.replace("model.", "")
-            writer.add_tensor(mapped, _finalize(data))
+            yield (_map(f"model.layers.{i}.{suffix}"), shape)
 
     # --- Shared YOCO cross KV tensors ---
-    shared_tensors = generate_shared_cross_kv_tensors(config)
-    for tname, shape in shared_tensors.items():
-        data = _make_tensor(shape)
-        if len(shape) == 2:
-            data = weight_quant_ternary(data)
-        writer.add_tensor(tname, _finalize(data))
+    for tname, shape in generate_shared_cross_kv_tensors(config).items():
+        yield (tname, shape)
 
     # --- Embedding projections ---
     if config.get("embproj", False):
-        embproj_tensors = generate_embproj_tensors(config)
-        for tname, shape in embproj_tensors.items():
-            data = _finalize(_make_tensor(shape))
-            writer.add_tensor(tname, data)
+        for tname, shape in generate_embproj_tensors(config).items():
+            yield (tname, shape)
 
     # --- Final norm ---
-    data = _finalize(_make_tensor((hidden,)))
-    name = tensor_map.get_name("model.norm.weight", try_suffixes=(".weight",))
-    writer.add_tensor(name, data)
+    yield (tensor_map.get_name("model.norm.weight", try_suffixes=(".weight",)),
+           (hidden,))
+
+
+def _add_all_tensor_info(writer, config, tensor_map, dtype=np.float32):
+    """Phase 1: register tensor metadata (no data in memory)."""
+    np_dtype = _get_tensor_dtype(dtype)
+    for name, shape in _iter_all_tensor_names_and_shapes(config, tensor_map):
+        # Compute nbytes for this tensor in target dtype
+        n_elements = int(np.prod(shape))
+        nbytes = n_elements * np_dtype.itemsize
+        writer.add_tensor_info(name, shape, np_dtype, nbytes)
+
+
+def _write_all_tensor_data(writer, config, tensor_map, dtype=np.float32):
+    """Phase 2: generate and stream each tensor to disk one at a time."""
+    import time
+
+    hidden = config["hidden_size"]
+    n_self = config["num_self_layers"]
+    n_cross = config["num_cross_layers"]
+
+    quant_names = {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"}
+
+    self_attn_template = generate_self_layer_attn_tensors(config)
+    moe_template = generate_moe_tensors(config)
+    cross_attn_template = generate_cross_layer_attn_tensors(config)
+
+    # Pre-compute total tensor count and total bytes for progress
+    np_dtype = _get_tensor_dtype(dtype)
+    all_shapes = list(_iter_all_tensor_names_and_shapes(config, tensor_map))
+    total_tensors = len(all_shapes)
+    total_bytes = sum(int(np.prod(s)) * np_dtype.itemsize for _, s in all_shapes)
+    del all_shapes
+
+    written_tensors = 0
+    written_bytes = 0
+    t_start = time.time()
+
+    def _make_tensor(shape):
+        return np.random.randn(*shape).astype(np.float32)
+
+    def _finalize(data):
+        return data.astype(dtype)
+
+    def _make_and_finalize(shape, suffix=None):
+        data = _make_tensor(shape)
+        if suffix is not None:
+            should_quant = any(qn in suffix for qn in quant_names)
+            if should_quant and len(shape) == 2:
+                data = weight_quant_ternary(data)
+        return _finalize(data)
+
+    def _write_one(tensor_data, name=""):
+        nonlocal written_tensors, written_bytes
+        nbytes = tensor_data.nbytes
+        writer.write_tensor_data(tensor_data)
+        written_tensors += 1
+        written_bytes += nbytes
+        elapsed = time.time() - t_start
+        speed = written_bytes / elapsed / (1024**3) if elapsed > 0 else 0
+        pct = written_bytes / total_bytes * 100
+        logger.info(
+            f"  [{written_tensors}/{total_tensors}] {pct:5.1f}% | "
+            f"{written_bytes/(1024**3):.2f}/{total_bytes/(1024**3):.2f} GB | "
+            f"{speed:.2f} GB/s | {name} ({nbytes/(1024**2):.1f} MB)"
+        )
+
+    vocab = config["vocab_size"]
+
+    # --- Embedding ---
+    _write_one(_make_and_finalize((vocab, hidden)), "token_embd.weight")
+
+    # --- Self-decoder layers ---
+    for sl in range(n_self):
+        for suffix, shape in self_attn_template.items():
+            _write_one(_make_and_finalize(shape, suffix), f"layer.{sl}.{suffix}")
+        for suffix, shape in moe_template.items():
+            _write_one(_make_and_finalize(shape, suffix), f"layer.{sl}.{suffix}")
+
+    # --- Cross-decoder layers ---
+    for cl in range(n_cross):
+        i = n_self + cl
+        for suffix, shape in cross_attn_template.items():
+            _write_one(_make_and_finalize(shape, suffix), f"layer.{i}.{suffix}")
+        for suffix, shape in moe_template.items():
+            _write_one(_make_and_finalize(shape, suffix), f"layer.{i}.{suffix}")
+
+    # --- Shared YOCO cross KV tensors ---
+    for tname, shape in generate_shared_cross_kv_tensors(config).items():
+        data = _make_tensor(shape)
+        if len(shape) == 2:
+            data = weight_quant_ternary(data)
+        _write_one(_finalize(data), tname)
+
+    # --- Embedding projections ---
+    if config.get("embproj", False):
+        for tname, shape in generate_embproj_tensors(config).items():
+            _write_one(_make_and_finalize(shape), tname)
+
+    # --- Final norm ---
+    _write_one(_make_and_finalize((hidden,)), "output_norm.weight")
+
+    elapsed = time.time() - t_start
+    logger.info(f"  All {total_tensors} tensors written in {elapsed:.1f}s "
+                f"({total_bytes/(1024**3):.2f} GB, avg {total_bytes/elapsed/(1024**3):.2f} GB/s)")
 
 
 def generate_f16_gguf(model_dir: Path, output_path: Path, config: dict):
@@ -416,11 +478,19 @@ def generate_f16_gguf(model_dir: Path, output_path: Path, config: dict):
     add_vocab(writer, model_dir, config["vocab_size"])
 
     tensor_map = gguf.get_tensor_name_map(gguf.MODEL_ARCH.BITNET, n_layers)
-    _write_all_tensors(writer, config, tensor_map, dtype=np.float16)
 
+    # Phase 1: register all tensor metadata (no data in memory)
+    _add_all_tensor_info(writer, config, tensor_map, dtype=np.float16)
+
+    # Write header + kv + tensor info to file
     writer.write_header_to_file()
     writer.write_kv_data_to_file()
-    writer.write_tensors_to_file()
+    writer.write_ti_data_to_file()
+
+    # Phase 2: generate and stream tensors one at a time
+    _write_all_tensor_data(writer, config, tensor_map, dtype=np.float16)
+
+    writer.flush()
     writer.close()
 
     f16_size = output_path.stat().st_size / (1024**3)
