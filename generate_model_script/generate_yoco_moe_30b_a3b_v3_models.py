@@ -250,8 +250,8 @@ def generate_moe_tensors(config):
         # Router
         "mlp.gate.weight": (n_experts, hidden),
         # Packed expert weights: w13 = [gate_proj | up_proj], w2 = down_proj
-        "mlp.w13": (n_experts, 2 * ffn_dim, expert_input_dim),
-        "mlp.w2": (n_experts, expert_input_dim, ffn_dim),
+        "mlp.w13.weight": (n_experts, 2 * ffn_dim, expert_input_dim),
+        "mlp.w2.weight": (n_experts, expert_input_dim, ffn_dim),
     }
 
     # Latent projections (only if moe_latent_dim > 0)

@@ -941,8 +941,8 @@ def _load_ffn(store: _TensorStore, prefix: str, config: ModelConfig, *, quantize
 def _load_moe(store: _TensorStore, prefix: str, config: ModelConfig) -> _MoE:
     router_weight = store.take(prefix + ".gate.weight", dtype=torch.float32)
     assert router_weight is not None
-    raw_w13 = store.take(prefix + ".w13")
-    raw_w2 = store.take(prefix + ".w2")
+    raw_w13 = store.take(prefix + ".w13.weight")
+    raw_w2 = store.take(prefix + ".w2.weight")
     assert raw_w13 is not None and raw_w2 is not None
     if raw_w13.ndim == 4:
         raw_w13 = raw_w13.reshape(raw_w13.shape[0], -1, raw_w13.shape[-1])

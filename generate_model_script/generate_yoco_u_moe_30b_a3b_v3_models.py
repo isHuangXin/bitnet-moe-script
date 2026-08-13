@@ -259,8 +259,8 @@ def generate_moe_tensors(config):
 
     tensors = {
         "mlp.gate.weight": (n_experts, hidden),
-        "mlp.w13": (n_experts, 2 * ffn_dim, expert_input_dim),
-        "mlp.w2": (n_experts, expert_input_dim, ffn_dim),
+        "mlp.w13.weight": (n_experts, 2 * ffn_dim, expert_input_dim),
+        "mlp.w2.weight": (n_experts, expert_input_dim, ffn_dim),
     }
 
     if latent_dim > 0:
