@@ -105,13 +105,17 @@ def create_hf_model_dir(output_dir: Path, config: dict):
     with open(output_dir / "config.json", "w") as f:
         json.dump(config, f, indent=2)
 
-    tokenizer_src = Path("/home/azureuser/huangxin/code_list/BitNet/gpu/tokenizer.model")
-    if tokenizer_src.exists():
-        import shutil
-        shutil.copy(tokenizer_src, output_dir / "tokenizer.model")
-    else:
-        logger.error(f"Tokenizer not found at {tokenizer_src}")
-        sys.exit(1)
+    tokenizer_dst = output_dir / "tokenizer.model"
+    if not tokenizer_dst.exists():
+        try:
+            from huggingface_hub import hf_hub_download
+            src = hf_hub_download("1bitLLM/bitnet_b1_58-large", "tokenizer.model")
+            import shutil
+            shutil.copy(src, tokenizer_dst)
+            logger.info(f"Downloaded tokenizer from HuggingFace to {tokenizer_dst}")
+        except Exception as e:
+            logger.error(f"Failed to download tokenizer from HuggingFace: {e}")
+            sys.exit(1)
     return output_dir
 
 
@@ -307,7 +311,7 @@ def weight_quant_ternary(weight: np.ndarray) -> np.ndarray:
     return np.clip(np.round(w * s), -1, 1) / s
 
 
-def _write_all_tensors(writer, config, tensor_map):
+def _write_all_tensors(writer, config, tensor_map, dtype=np.float32):
     """Write all model tensors with T=3 self-decoder weight sharing.
 
     Self-decoder: 10 unique layers, each shared across T=3 iterations.
@@ -324,8 +328,14 @@ def _write_all_tensors(writer, config, tensor_map):
 
     quant_names = {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"}
 
+    def _make_tensor(shape):
+        return np.random.randn(*shape).astype(np.float32)
+
+    def _finalize(data):
+        return data.astype(dtype)
+
     # --- Embedding ---
-    data = np.random.randn(vocab, hidden).astype(np.float32)
+    data = _finalize(_make_tensor((vocab, hidden)))
     name = tensor_map.get_name("model.embed_tokens.weight", try_suffixes=(".weight",))
     writer.add_tensor(name, data)
 
@@ -336,10 +346,6 @@ def _write_all_tensors(writer, config, tensor_map):
     # Pre-generate unique weights for each of the 10 self-decoder layers
     self_attn_weights = {}
     for suffix, shape in self_attn_template.items():
-        data = np.random.randn(*shape).astype(np.float32)
-        should_quant = any(qn in suffix for qn in quant_names)
-        if should_quant and len(shape) == 2:
-            data = weight_quant_ternary(data)
         self_attn_weights[suffix] = [None] * n_self
     moe_weights = {}
     for suffix, shape in moe_template.items():
@@ -347,18 +353,18 @@ def _write_all_tensors(writer, config, tensor_map):
 
     for sl in range(n_self):
         for suffix, shape in self_attn_template.items():
-            data = np.random.randn(*shape).astype(np.float32)
+            data = _make_tensor(shape)
             should_quant = any(qn in suffix for qn in quant_names)
             if should_quant and len(shape) == 2:
                 data = weight_quant_ternary(data)
-            self_attn_weights[suffix][sl] = data
+            self_attn_weights[suffix][sl] = _finalize(data)
 
         for suffix, shape in moe_template.items():
-            data = np.random.randn(*shape).astype(np.float32)
+            data = _make_tensor(shape)
             should_quant = any(qn in suffix for qn in quant_names)
             if should_quant and len(shape) == 2:
                 data = weight_quant_ternary(data)
-            moe_weights[suffix][sl] = data
+            moe_weights[suffix][sl] = _finalize(data)
 
     # Write unrolled self-decoder layers: T iterations x N_SELF_LAYERS
     for t in range(T):
@@ -392,44 +398,43 @@ def _write_all_tensors(writer, config, tensor_map):
         # Cross attention (no K/V proj - uses shared YOCO KV)
         for suffix, shape in cross_attn_template.items():
             tensor_name = f"model.layers.{i}.{suffix}"
-            data = np.random.randn(*shape).astype(np.float32)
+            data = _make_tensor(shape)
             should_quant = any(qn in suffix for qn in quant_names)
             if should_quant and len(shape) == 2:
                 data = weight_quant_ternary(data)
             mapped = tensor_map.get_name(tensor_name, try_suffixes=(".weight",))
             if mapped is None:
                 mapped = tensor_name.replace("model.", "")
-            writer.add_tensor(mapped, data)
+            writer.add_tensor(mapped, _finalize(data))
 
         # MoE FFN (independent per cross layer)
         for suffix, shape in moe_template.items():
             tensor_name = f"model.layers.{i}.{suffix}"
-            data = np.random.randn(*shape).astype(np.float32)
+            data = _make_tensor(shape)
             should_quant = any(qn in suffix for qn in quant_names)
             if should_quant and len(shape) == 2:
                 data = weight_quant_ternary(data)
             mapped = tensor_map.get_name(tensor_name, try_suffixes=(".weight",))
             if mapped is None:
                 mapped = tensor_name.replace("model.", "")
-            writer.add_tensor(mapped, data)
+            writer.add_tensor(mapped, _finalize(data))
 
     # --- Shared YOCO cross KV tensors ---
     shared_tensors = generate_shared_cross_kv_tensors(config)
     for tname, shape in shared_tensors.items():
-        data = np.random.randn(*shape).astype(np.float32)
+        data = _make_tensor(shape)
         if len(shape) == 2:
             data = weight_quant_ternary(data)
-        writer.add_tensor(tname, data)
+        writer.add_tensor(tname, _finalize(data))
 
     # --- Embedding projections ---
     if config.get("embproj", False):
         embproj_tensors = generate_embproj_tensors(config)
         for tname, shape in embproj_tensors.items():
-            data = np.random.randn(*shape).astype(np.float32)
-            writer.add_tensor(tname, data)
+            writer.add_tensor(tname, _finalize(_make_tensor(shape)))
 
     # --- Final norm ---
-    data = np.random.randn(hidden).astype(np.float32)
+    data = _finalize(_make_tensor((hidden,)))
     name = tensor_map.get_name("model.norm.weight", try_suffixes=(".weight",))
     writer.add_tensor(name, data)
 
@@ -445,7 +450,7 @@ def generate_f16_gguf(model_dir: Path, output_path: Path, config: dict):
     add_vocab(writer, model_dir, config["vocab_size"])
 
     tensor_map = gguf.get_tensor_name_map(gguf.MODEL_ARCH.BITNET, n_layers)
-    _write_all_tensors(writer, config, tensor_map)
+    _write_all_tensors(writer, config, tensor_map, dtype=np.float16)
 
     writer.write_header_to_file()
     writer.write_kv_data_to_file()
@@ -461,9 +466,9 @@ def generate_i2s_gguf(f16_path: Path, output_path: Path):
     logger.info(f"Quantizing F16 -> I2_S (with embedding Q8_0)")
     logger.info(f"  Source: {f16_path}")
 
-    quantize_bin = Path("/home/huangxin/code_list/bitnet-moe-script/build_script/build_bin/bin/llama-quantize")
+    quantize_bin = Path("/home/azureuser/huangxin/code_list/bitnet-moe-script/build_script/build_bin_yoco_moe/bin/llama-quantize")
     if not quantize_bin.exists():
-        quantize_bin = Path("/home/huangxin/code_list/bitnet-yoco-u-script/build_script/build_bin_yoco_u/bin/llama-quantize")
+        quantize_bin = Path("/home/azureuser/huangxin/code_list/bitnet-yoco-u-script/build_script/build_bin_yoco_u/bin/llama-quantize")
     if not quantize_bin.exists():
         logger.error(f"llama-quantize not found at {quantize_bin}")
         sys.exit(1)

@@ -13,7 +13,7 @@ set -e
 MODEL_DIR="/home/azureuser/models/yoco-moe-models/yoco-moe-30b-a3b-v3"
 F16_MODEL="${MODEL_DIR}/yoco-moe-30b-a3b-v3-bitnet-f16/ggml-model-f16.gguf"
 I2S_MODEL="${MODEL_DIR}/yoco-moe-30b-a3b-v3-bitnet-i2s/ggml-model-i2_s.gguf"
-BENCH="/home/azureuser/huangxin/code_list/bitnet-moe-script/build_script/build_bin_yoco_u/bin/llama-bench"
+BENCH="/home/azureuser/huangxin/code_list/bitnet-moe-script/build_script/build_bin_yoco_moe/bin/llama-bench"
 THREADS=${1:-4}
 NUMA_NODE=${2:-""}
 
