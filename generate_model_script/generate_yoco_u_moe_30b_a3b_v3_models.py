@@ -173,8 +173,8 @@ def add_model_params(writer, config, name, file_type):
     writer.add_embedding_length(hidden)
     writer.add_feed_forward_length(config["intermediate_size"])
 
-    # Per-layer head counts: self-decoder (unrolled) + cross-decoder
-    n_head_arr = [n_heads] * n_self_unrolled + [n_heads_cross] * n_cross
+    # Per-layer head counts: self-decoder (unrolled) + cross-decoder (diff_v3: doubled for differential attention)
+    n_head_arr = [n_heads * 2] * n_self_unrolled + [n_heads_cross * 2] * n_cross
     n_head_kv_arr = [n_kv_heads] * n_self_unrolled + [n_cross_kv_heads] * n_cross
     writer.add_head_count(n_head_arr)
     writer.add_head_count_kv(n_head_kv_arr)
