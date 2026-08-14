@@ -200,6 +200,12 @@ def add_model_params(writer, config, name, file_type):
     writer.add_uint32("bitnet.d_shared_expert", config["d_shared_expert"])
     writer.add_uint32("bitnet.moe_latent_dim", config["moe_latent_dim"])
 
+    # SwiGLU clamping (swiglu_limit=10.0)
+    n_layers = config["num_hidden_layers"]
+    swiglu_clamp = [10.0] * n_layers
+    writer.add_array("bitnet.swiglu_clamp_exp", swiglu_clamp)
+    writer.add_array("bitnet.swiglu_clamp_shexp", swiglu_clamp)
+
 
 # ---------- tensor shape generators ----------
 
@@ -420,6 +426,11 @@ def _write_all_tensor_data(writer, config, tensor_map, dtype=np.float32):
         should_quant = any(qn in suffix for qn in quant_names)
         if should_quant and len(shape) == 2:
             data = weight_quant_ternary(data)
+        # L2 row-normalize router weights (PyTorch does this at runtime)
+        if "ffn_gate_inp" in suffix and "shexp" not in suffix:
+            row_norms = np.linalg.norm(data, axis=1, keepdims=True)
+            row_norms = np.maximum(row_norms, 1e-6)
+            data = data / row_norms
         return _finalize(data)
 
     def _write_one(tensor_data, name=""):
