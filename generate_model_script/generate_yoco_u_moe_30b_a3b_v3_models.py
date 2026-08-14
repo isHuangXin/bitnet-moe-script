@@ -527,9 +527,7 @@ def generate_i2s_gguf(f16_path: Path, output_path: Path):
     logger.info(f"Quantizing F16 -> I2_S (with embedding Q8_0)")
     logger.info(f"  Source: {f16_path}")
 
-    quantize_bin = Path("/home/azureuser/huangxin/code_list/bitnet-moe-script/build_script/build_bin_yoco_moe/bin/llama-quantize")
-    if not quantize_bin.exists():
-        quantize_bin = Path("/home/azureuser/huangxin/code_list/bitnet-yoco-u-script/build_script/build_bin_yoco_u/bin/llama-quantize")
+    quantize_bin = Path("/home/huangxin/code_list/bitnet-moe-script/build_script/build_bin_yoco_moe/bin/llama-quantize")
     if not quantize_bin.exists():
         logger.error(f"llama-quantize not found at {quantize_bin}")
         sys.exit(1)
@@ -564,7 +562,7 @@ def main():
     )
     parser.add_argument(
         "--output-dir", type=str,
-        default="/home/azureuser/models/yoco-moe-models/yoco-u-moe-30b-a3b-v3",
+        default="/data3/huangxin/model_list/yoco-u-moe-30b-a3b-v3",
         help="Output directory",
     )
     args = parser.parse_args()

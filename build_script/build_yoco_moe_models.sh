@@ -9,7 +9,7 @@
 # ==========================================================
 set -e
 
-BITNET_DIR="/home/azureuser/huangxin/code_list/BitNet"
+BITNET_DIR="/home/huangxin/code_list/BitNet"
 LLAMA_DIR="${BITNET_DIR}/3rdparty/llama.cpp"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
