@@ -217,6 +217,17 @@ def generate_self_layer_attn_tensors(config):
         # qk_rms_clip norms
         "attn_q_norm.weight": (q_dim,),
         "attn_k_norm.weight": (kv_dim,),
+        # ADP8 activation quantization scale/bias
+        "attn_q_act_scale.weight": (hidden,),
+        "attn_q_act_bias.weight": (hidden,),
+        "attn_k_act_scale.weight": (hidden,),
+        "attn_k_act_bias.weight": (hidden,),
+        "attn_v_act_scale.weight": (hidden,),
+        "attn_v_act_bias.weight": (hidden,),
+        "attn_out_act_scale.weight": (n_heads * head_dim,),
+        "attn_out_act_bias.weight": (n_heads * head_dim,),
+        "attn_gate_act_scale.weight": (hidden,),
+        "attn_gate_act_bias.weight": (hidden,),
         "ffn_norm.weight": (hidden,),
     }
     return tensors
@@ -237,6 +248,13 @@ def generate_cross_layer_attn_tensors(config):
         "attn_output.weight": (hidden, n_heads_cross * head_dim),
         "attn_gate.weight": (2 * n_heads_cross, hidden),
         "attn_q_norm.weight": (q_dim,),
+        # ADP8 activation quantization scale/bias (cross-decoder only has q and o_proj)
+        "attn_q_act_scale.weight": (hidden,),
+        "attn_q_act_bias.weight": (hidden,),
+        "attn_out_act_scale.weight": (n_heads_cross * head_dim,),
+        "attn_out_act_bias.weight": (n_heads_cross * head_dim,),
+        "attn_gate_act_scale.weight": (hidden,),
+        "attn_gate_act_bias.weight": (hidden,),
         "ffn_norm.weight": (hidden,),
     }
     return tensors
@@ -258,6 +276,11 @@ def generate_moe_tensors(config):
         # Packed expert weights: gate_up_exps = [gate_proj | up_proj], down_exps = down_proj
         "ffn_gate_up_exps.weight": (n_experts, 2 * ffn_dim, expert_input_dim),
         "ffn_down_exps.weight": (n_experts, expert_input_dim, ffn_dim),
+        # ADP8 activation quantization for MoE experts (per-expert scale/bias)
+        "ffn_gate_up_exps_act_scale.weight": (n_experts, expert_input_dim),
+        "ffn_gate_up_exps_act_bias.weight": (n_experts, expert_input_dim),
+        "ffn_down_exps_act_scale.weight": (n_experts, ffn_dim),
+        "ffn_down_exps_act_bias.weight": (n_experts, ffn_dim),
     }
 
     # Latent projections (only if moe_latent_dim > 0)
@@ -274,6 +297,11 @@ def generate_moe_tensors(config):
         tensors["ffn_up_shexp.weight"] = (d_shared, hidden)
         tensors["ffn_down_shexp.weight"] = (hidden, d_shared)
         tensors["ffn_gate_inp_shexp.weight"] = (1, hidden)
+        # ADP8 for shared expert
+        tensors["ffn_shexp_gate_up_act_scale.weight"] = (hidden,)
+        tensors["ffn_shexp_gate_up_act_bias.weight"] = (hidden,)
+        tensors["ffn_shexp_down_act_scale.weight"] = (d_shared,)
+        tensors["ffn_shexp_down_act_bias.weight"] = (d_shared,)
 
     return tensors
 
@@ -423,6 +451,11 @@ def _write_all_tensor_data(writer, config, tensor_map, dtype=np.float32):
                 row_norms = np.linalg.norm(data, axis=1, keepdims=True)
                 row_norms = np.maximum(row_norms, 1e-6)
                 data = data / row_norms
+            # ADP8 act_scale defaults to 1.0, act_bias defaults to 0.0
+            if "act_scale" in suffix:
+                data = np.ones(shape, dtype=np.float32)
+            elif "act_bias" in suffix:
+                data = np.zeros(shape, dtype=np.float32)
         return _finalize(data)
 
     def _write_one(tensor_data, name=""):
