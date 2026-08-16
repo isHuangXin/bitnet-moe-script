@@ -305,9 +305,18 @@ def generate_embproj_tensors(config):
 
 
 def weight_quant_ternary(weight: np.ndarray) -> np.ndarray:
+    """TernarySEQ per-row quantization: round(W/alpha * 1.5) / 1.5 * alpha."""
     w = weight.astype(np.float32)
-    s = 1.0 / max(np.abs(w).mean(), 1e-5)
-    return np.clip(np.round(w * s), -1, 1) / s
+    M = w.shape[0]
+    clip_ratio = 1.0 - 1e-2
+    result = np.zeros_like(w)
+    for row in range(M):
+        alpha = max(np.abs(w[row]).max(), 1e-5)
+        normalized = w[row] / alpha
+        normalized = np.clip(normalized, -clip_ratio, clip_ratio)
+        ternary = np.round(normalized * 1.5) / 1.5
+        result[row] = ternary * alpha
+    return result
 
 
 def _get_tensor_dtype(dtype):
@@ -513,6 +522,8 @@ def generate_i2s_gguf(f16_path: Path, output_path: Path):
         sys.exit(1)
 
     import subprocess
+    env = os.environ.copy()
+    env["BITNET_I2S_PER_ROW"] = "1"  # Use per-row TernarySEQ quantization for YOCO-MoE
     cmd = [
         str(quantize_bin),
         "--token-embedding-type", "Q8_0",
@@ -521,7 +532,7 @@ def generate_i2s_gguf(f16_path: Path, output_path: Path):
         "I2_S",
         "1",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if result.returncode != 0:
         logger.error(f"Quantization failed:\n{result.stderr}\n{result.stdout}")
         sys.exit(1)

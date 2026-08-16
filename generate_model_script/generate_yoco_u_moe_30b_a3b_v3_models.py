@@ -544,6 +544,8 @@ def generate_i2s_gguf(f16_path: Path, output_path: Path):
         sys.exit(1)
 
     import subprocess
+    env = os.environ.copy()
+    env["BITNET_I2S_PER_ROW"] = "1"  # Use per-row TernarySEQ quantization for YOCO-MoE
     cmd = [
         str(quantize_bin),
         "--token-embedding-type", "Q8_0",
@@ -552,7 +554,7 @@ def generate_i2s_gguf(f16_path: Path, output_path: Path):
         "I2_S",
         "1",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if result.returncode != 0:
         logger.error(f"Quantization failed:\n{result.stderr}\n{result.stdout}")
         sys.exit(1)
