@@ -487,7 +487,7 @@ def generate_f16_gguf(model_dir: Path, output_path: Path, config: dict):
     n_layers = config["num_hidden_layers"]
 
     writer = gguf.GGUFWriter(output_path, gguf.MODEL_ARCH_NAMES[gguf.MODEL_ARCH.BITNET])
-    add_model_params(writer, config, "yoco-moe-30b-a3b-v3-bitnet", gguf.GGMLQuantizationType.F16)
+    add_model_params(writer, config, "YOCO-MoE-30B-A3B-V3", gguf.GGMLQuantizationType.F16)
     add_vocab(writer, model_dir, config["vocab_size"])
 
     tensor_map = gguf.get_tensor_name_map(gguf.MODEL_ARCH.BITNET, n_layers)
