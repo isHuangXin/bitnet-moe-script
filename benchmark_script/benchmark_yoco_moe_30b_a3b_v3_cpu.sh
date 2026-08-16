@@ -19,7 +19,10 @@ NUMA_NODE=${2:-""}
 
 # Build CPU affinity prefix
 TASKSET=""
-if [ -n "$NUMA_NODE" ]; then
+if [ "$NUMA_NODE" = "all" ]; then
+    TASKSET="numactl --interleave=0,1"
+    echo "CPU Pinning: ALL NUMA nodes (interleaved memory)"
+elif [ -n "$NUMA_NODE" ]; then
     TASKSET="numactl --cpunodebind=$NUMA_NODE --membind=$NUMA_NODE"
     CPUS=$(numactl --hardware 2>/dev/null | grep "node $NUMA_NODE cpus:" | sed 's/.*cpus: //')
     echo "CPU Pinning: NUMA node $NUMA_NODE (cores: $CPUS)"
