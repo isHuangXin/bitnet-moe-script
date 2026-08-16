@@ -410,9 +410,14 @@ def _add_all_tensor_info(writer, config, tensor_map, dtype=np.float32):
     """Phase 1: register tensor metadata (no data in memory)."""
     np_dtype = _get_tensor_dtype(dtype)
     for name, shape in _iter_all_tensor_names_and_shapes(config, tensor_map):
+        # act_scale/bias are always F32
+        if "act_scale" in name or "act_bias" in name:
+            t_dtype = np.dtype(np.float32)
+        else:
+            t_dtype = np_dtype
         n_elements = int(np.prod(shape))
-        nbytes = n_elements * np_dtype.itemsize
-        writer.add_tensor_info(name, shape, np_dtype, nbytes)
+        nbytes = n_elements * t_dtype.itemsize
+        writer.add_tensor_info(name, shape, t_dtype, nbytes)
 
 
 def _write_all_tensor_data(writer, config, tensor_map, dtype=np.float32):
@@ -464,9 +469,9 @@ def _write_all_tensor_data(writer, config, tensor_map, dtype=np.float32):
             data = data / row_norms
         # ADP8 act_scale defaults to 1.0, act_bias defaults to 0.0
         if "act_scale" in suffix:
-            data = np.ones(shape, dtype=np.float32)
+            return np.ones(shape, dtype=np.float32)
         elif "act_bias" in suffix:
-            data = np.zeros(shape, dtype=np.float32)
+            return np.zeros(shape, dtype=np.float32)
         return _finalize(data)
 
     def _write_one(tensor_data, name=""):

@@ -403,10 +403,14 @@ def _add_all_tensor_info(writer, config, tensor_map, dtype=np.float32):
     """Phase 1: register tensor metadata (no data in memory)."""
     np_dtype = _get_tensor_dtype(dtype)
     for name, shape in _iter_all_tensor_names_and_shapes(config, tensor_map):
-        # Compute nbytes for this tensor in target dtype
+        # act_scale/bias are always F32
+        if "act_scale" in name or "act_bias" in name:
+            t_dtype = np.dtype(np.float32)
+        else:
+            t_dtype = np_dtype
         n_elements = int(np.prod(shape))
-        nbytes = n_elements * np_dtype.itemsize
-        writer.add_tensor_info(name, shape, np_dtype, nbytes)
+        nbytes = n_elements * t_dtype.itemsize
+        writer.add_tensor_info(name, shape, t_dtype, nbytes)
 
 
 def _write_all_tensor_data(writer, config, tensor_map, dtype=np.float32):
@@ -453,9 +457,9 @@ def _write_all_tensor_data(writer, config, tensor_map, dtype=np.float32):
                 data = data / row_norms
             # ADP8 act_scale defaults to 1.0, act_bias defaults to 0.0
             if "act_scale" in suffix:
-                data = np.ones(shape, dtype=np.float32)
+                return np.ones(shape, dtype=np.float32)
             elif "act_bias" in suffix:
-                data = np.zeros(shape, dtype=np.float32)
+                return np.zeros(shape, dtype=np.float32)
         return _finalize(data)
 
     def _write_one(tensor_data, name=""):
@@ -547,6 +551,7 @@ def generate_i2s_gguf(f16_path: Path, output_path: Path):
     """Quantize an existing F16 GGUF to I2_S."""
     logger.info(f"Quantizing F16 -> I2_S (with embedding Q8_0)")
     logger.info(f"  Source: {f16_path}")
+    logger.info(f"  Output: {output_path}")
 
     # Find llama-quantize binary
     quantize_bin = Path("/home/huangxin/code_list/bitnet-moe-script/build_script/build_bin_yoco_moe/bin/llama-quantize")
@@ -565,9 +570,20 @@ def generate_i2s_gguf(f16_path: Path, output_path: Path):
         "I2_S",
         "1",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
-    if result.returncode != 0:
-        logger.error(f"Quantization failed:\n{result.stderr}\n{result.stdout}")
+    logger.info(f"  Running: {' '.join(cmd)}")
+    logger.info(f"  BITNET_I2S_PER_ROW=1")
+
+    # Stream output in real-time
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, env=env, bufsize=1)
+    for line in process.stdout:
+        line = line.rstrip()
+        if line:
+            logger.info(f"  [quantize] {line}")
+    process.wait()
+
+    if process.returncode != 0:
+        logger.error(f"Quantization failed with return code {process.returncode}")
         sys.exit(1)
 
     f16_size = f16_path.stat().st_size / (1024**3)
@@ -589,6 +605,14 @@ def main():
         default="/data3/huangxin/model_list/yoco-moe-30b-a3b-v3",
         help="Output directory",
     )
+    parser.add_argument(
+        "--skip-f16", action="store_true",
+        help="Skip F16 model generation (use existing F16 GGUF for I2_S quantization)",
+    )
+    parser.add_argument(
+        "--skip-i2s", action="store_true",
+        help="Skip I2_S quantization",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -609,13 +633,20 @@ def main():
     f16_dir = output_base / "yoco-moe-30b-a3b-v3-bitnet-f16"
     f16_dir.mkdir(parents=True, exist_ok=True)
     f16_path = f16_dir / "ggml-model-f16.gguf"
-    generate_f16_gguf(hf_dir, f16_path, config)
+    if args.skip_f16:
+        if not f16_path.exists():
+            logger.error(f"F16 model not found: {f16_path}")
+            sys.exit(1)
+        logger.info(f"Skipping F16 generation, using existing: {f16_path}")
+    else:
+        generate_f16_gguf(hf_dir, f16_path, config)
 
     # Generate I2_S model (quantized from F16)
-    i2s_dir = output_base / "yoco-moe-30b-a3b-v3-bitnet-i2s"
-    i2s_dir.mkdir(parents=True, exist_ok=True)
-    i2s_path = i2s_dir / "ggml-model-i2_s.gguf"
-    generate_i2s_gguf(f16_path, i2s_path)
+    if not args.skip_i2s:
+        i2s_dir = output_base / "yoco-moe-30b-a3b-v3-bitnet-i2s"
+        i2s_dir.mkdir(parents=True, exist_ok=True)
+        i2s_path = i2s_dir / "ggml-model-i2_s.gguf"
+        generate_i2s_gguf(f16_path, i2s_path)
 
     # Count params
     self_attn_params = _count_params(generate_self_layer_attn_tensors(config))
