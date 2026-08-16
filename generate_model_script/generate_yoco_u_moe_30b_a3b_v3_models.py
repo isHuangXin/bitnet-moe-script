@@ -47,8 +47,8 @@ logger = logging.getLogger("generate-yoco-u-moe-30b-a3b-v3")
 N_SELF_LAYERS = 10       # unique self-decoder layers
 N_CROSS_LAYERS = 10      # cross-decoder layers
 T_ITERS = 3              # universal loop iterations
-N_SELF_UNROLLED = N_SELF_LAYERS * T_ITERS  # 30
-N_TOTAL_LAYERS = N_SELF_UNROLLED + N_CROSS_LAYERS  # 40
+N_STORED_LAYERS = N_SELF_LAYERS + N_CROSS_LAYERS  # 20 (stored in GGUF)
+N_TOTAL_LAYERS = N_STORED_LAYERS  # 20 layers stored, inference loops self-decoder T times
 
 MOE_EXPERT_NUM = 128
 MOE_FFN_DIM = 1280
@@ -165,7 +165,6 @@ def add_model_params(writer, config, name, file_type):
     n_self = config["num_self_layers"]
     n_cross = config["num_cross_layers"]
     T = config["yoco_u_iters"]
-    n_self_unrolled = n_self * T
 
     writer.add_name(name)
     writer.add_block_count(n_layers)
@@ -173,9 +172,9 @@ def add_model_params(writer, config, name, file_type):
     writer.add_embedding_length(hidden)
     writer.add_feed_forward_length(config["intermediate_size"])
 
-    # Per-layer head counts: self-decoder (unrolled) + cross-decoder (diff_v3: doubled for differential attention)
-    n_head_arr = [n_heads * 2] * n_self_unrolled + [n_heads_cross * 2] * n_cross
-    n_head_kv_arr = [n_kv_heads] * n_self_unrolled + [n_cross_kv_heads] * n_cross
+    # Per-layer head counts: 10 self + 10 cross (stored layers, not unrolled)
+    n_head_arr = [n_heads * 2] * n_self + [n_heads_cross * 2] * n_cross
+    n_head_kv_arr = [n_kv_heads] * n_self + [n_cross_kv_heads] * n_cross
     writer.add_head_count(n_head_arr)
     writer.add_head_count_kv(n_head_kv_arr)
 
@@ -313,9 +312,18 @@ def generate_embproj_tensors(config):
 
 
 def weight_quant_ternary(weight: np.ndarray) -> np.ndarray:
+    """TernarySEQ per-row quantization: round(W/alpha * 1.5) / 1.5 * alpha."""
     w = weight.astype(np.float32)
-    s = 1.0 / max(np.abs(w).mean(), 1e-5)
-    return np.clip(np.round(w * s), -1, 1) / s
+    M = w.shape[0]
+    clip_ratio = 1.0 - 1e-2
+    result = np.zeros_like(w)
+    for row in range(M):
+        alpha = max(np.abs(w[row]).max(), 1e-5)
+        normalized = w[row] / alpha
+        normalized = np.clip(normalized, -clip_ratio, clip_ratio)
+        ternary = np.round(normalized * 1.5) / 1.5
+        result[row] = ternary * alpha
+    return result
 
 
 def _get_tensor_dtype(dtype):
@@ -333,8 +341,6 @@ def _iter_all_tensor_names_and_shapes(config, tensor_map):
     hidden = config["hidden_size"]
     n_self = config["num_self_layers"]
     n_cross = config["num_cross_layers"]
-    T = config["yoco_u_iters"]
-    n_self_unrolled = n_self * T
     vocab = config["vocab_size"]
 
     self_attn_template = generate_self_layer_attn_tensors(config)
@@ -344,18 +350,16 @@ def _iter_all_tensor_names_and_shapes(config, tensor_map):
     # --- Embedding ---
     yield ("token_embd.weight", (vocab, hidden))
 
-    # --- Unrolled self-decoder layers (0..29) ---
-    for t in range(T):
-        for sl in range(n_self):
-            i = t * n_self + sl
-            for suffix, shape in self_attn_template.items():
-                yield (f"blk.{i}.{suffix}", shape)
-            for suffix, shape in moe_template.items():
-                yield (f"blk.{i}.{suffix}", shape)
+    # --- Self-decoder layers (0..9) ---
+    for sl in range(n_self):
+        for suffix, shape in self_attn_template.items():
+            yield (f"blk.{sl}.{suffix}", shape)
+        for suffix, shape in moe_template.items():
+            yield (f"blk.{sl}.{suffix}", shape)
 
-    # --- Cross-decoder layers (30..39) ---
+    # --- Cross-decoder layers (10..19) ---
     for cl in range(n_cross):
-        i = n_self_unrolled + cl
+        i = n_self + cl
         for suffix, shape in cross_attn_template.items():
             yield (f"blk.{i}.{suffix}", shape)
         for suffix, shape in moe_template.items():
@@ -395,7 +399,6 @@ def _write_all_tensor_data(writer, config, tensor_map, dtype=np.float32):
     n_self = config["num_self_layers"]
     n_cross = config["num_cross_layers"]
     T = config["yoco_u_iters"]
-    n_self_unrolled = n_self * T
     vocab = config["vocab_size"]
 
     quant_names = {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"}
@@ -451,33 +454,16 @@ def _write_all_tensor_data(writer, config, tensor_map, dtype=np.float32):
     # --- Embedding ---
     _write_one(_finalize(_make_tensor((vocab, hidden))), "token_embd.weight")
 
-    # --- Self-decoder: pre-generate unique weights, then write T copies ---
-    unique_self_attn = [{} for _ in range(n_self)]
-    unique_moe = [{} for _ in range(n_self)]
-
+    # --- Self-decoder: 10 unique layers (inference loops T=3 times) ---
     for sl in range(n_self):
         for suffix, shape in self_attn_template.items():
-            unique_self_attn[sl][suffix] = _make_and_quant(shape, suffix)
+            _write_one(_make_and_quant(shape, suffix), f"layer.{sl}.{suffix}")
         for suffix, shape in moe_template.items():
-            unique_moe[sl][suffix] = _make_and_quant(shape, suffix)
-
-    # Write unrolled self-decoder layers: T iterations x N_SELF_LAYERS
-    for t in range(T):
-        for sl in range(n_self):
-            i = t * n_self + sl
-            for suffix in self_attn_template:
-                _write_one(unique_self_attn[sl][suffix].copy(),
-                           f"layer.{i}.{suffix} (unique={sl},iter={t})")
-            for suffix in moe_template:
-                _write_one(unique_moe[sl][suffix].copy(),
-                           f"layer.{i}.{suffix} (unique={sl},iter={t})")
-
-    # Free unique weights
-    del unique_self_attn, unique_moe
+            _write_one(_make_and_quant(shape, suffix), f"layer.{sl}.{suffix}")
 
     # --- Cross-decoder layers ---
     for cl in range(n_cross):
-        i = n_self_unrolled + cl
+        i = n_self + cl
         for suffix, shape in cross_attn_template.items():
             _write_one(_make_and_quant(shape, suffix), f"layer.{i}.{suffix}")
         for suffix, shape in moe_template.items():
@@ -586,7 +572,6 @@ def main():
     n_self = config["num_self_layers"]
     n_cross = config["num_cross_layers"]
     T = config["yoco_u_iters"]
-    n_self_unrolled = n_self * T
     n_layers = config["num_hidden_layers"]
 
     output_base = Path(args.output_dir)
@@ -661,7 +646,7 @@ def main():
     print(f"\nParams:")
     print(f"  Unique (storage):  {unique_params:,} ({unique_params/1e9:.2f}B)")
     print(f"  Compute (per tok): {compute_params:,} ({compute_params/1e9:.2f}B)")
-    print(f"  Self-decoder: {n_self} unique layers x T={T} = {n_self_unrolled} unrolled layers (shared weights)")
+    print(f"  Self-decoder: {n_self} unique layers x T={T} (inference loops {T} times)")
     print(f"  Cross-decoder: {n_cross} independent layers")
 
 
