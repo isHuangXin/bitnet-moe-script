@@ -2,7 +2,7 @@
 """
 Generate YOCO-MoE-30B-A3B-V3 model (F16 and I2_S).
 
-Architecture (from model-config.md / simple_quant_moe_infer_with_mtp.py):
+Architecture (from model_config/model-config.md / model_config/simple_quant_moe_infer_with_mtp.py):
   d_model=3072, d_ffn=9216, head=32, cross_head=32,
   kv_head=8, cross_kv_head=8, head_dim=128,
   n_layers=20 (10 self + 10 cross), yoco_window_size=512,

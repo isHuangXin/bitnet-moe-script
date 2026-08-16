@@ -29,8 +29,11 @@ YOCO-MoE 模型的 GGUF 生成、构建与性能基准测试工具集。
 ├── benchmark_script/               # CPU 基准测试脚本
 │   ├── benchmark_yoco_moe_30b_a3b_v3_cpu.sh
 │   └── benchmark_yoco_u_moe_30b_a3b_v3_cpu.sh
-├── simple_quant_moe_infer_with_mtp.py  # 独立 PyTorch 推理参考实现
-└── model-config.md                 # 模型配置说明
+├── model_config/                   # 模型配置与参考实现
+│   ├── simple_quant_moe_infer_with_mtp.py  # 独立 PyTorch 推理参考实现
+│   └── model-config.md                 # 模型配置说明
+├── verify_precision_script/        # 精度验证脚本
+│   └── verify_precision.py
 ```
 
 ## 使用流程
@@ -69,7 +72,7 @@ bash benchmark_script/benchmark_yoco_u_moe_30b_a3b_v3_cpu.sh 8 0
 
 ### 4. PyTorch 参考推理
 
-`simple_quant_moe_infer_with_mtp.py` 提供独立的单 GPU PyTorch 推理实现，仅依赖标准库和 PyTorch，支持从合并检查点加载量化模型。
+`model_config/simple_quant_moe_infer_with_mtp.py` 提供独立的单 GPU PyTorch 推理实现，仅依赖标准库和 PyTorch，支持从合并检查点加载量化模型。
 
 ## 依赖
 
