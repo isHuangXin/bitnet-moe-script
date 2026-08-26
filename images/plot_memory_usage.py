@@ -173,29 +173,70 @@ def main():
 
         color = COLORS.get(name, None)
         peak = rss.max()
-        label = f'{name} (peak: {peak:.0f} MB / {peak/1024:.1f} GB)'
+        label = f'{name}'
         ax.plot(times, rss, linewidth=1.5, label=label, color=color)
 
-        # Detect phase boundary (F16 -> I2_S) by finding the biggest drop
+        # Detect phase boundary (F16 -> I2_S)
+        # Look for a gap where RSS drops to near 0 between two non-zero regions
         phase_boundary = None
-        for i in range(1, len(rss)):
-            if rss[i-1] > peak * 0.5 and rss[i] < peak * 0.3:
-                phase_boundary = i
-                break
+        for i in range(1, len(rss) - 1):
+            # Find where RSS drops below 10% of peak after being high
+            if rss[i] < peak * 0.1 and np.max(rss[:i]) > peak * 0.5:
+                # Find where it comes back up
+                for j in range(i, len(rss)):
+                    if rss[j] > peak * 0.05 and rss[j] < peak * 0.5:
+                        phase_boundary = j
+                        break
+                if phase_boundary:
+                    break
 
         if phase_boundary is not None:
             t_split = times[phase_boundary]
-            ax.axvline(x=t_split, color=color, linestyle='--', alpha=0.7, linewidth=1.5)
-            # F16 label at top
-            ax.annotate('F16', xy=(t_split / 2, peak * 1.02),
-                        ha='center', va='bottom', fontsize=11, fontweight='bold',
-                        color=color, alpha=0.8)
-            # I2_S label at top
-            t_i2s_mid = t_split + (times[-1] - t_split) / 2
-            y_i2s = rss[phase_boundary:].max()
-            ax.annotate('I2_S', xy=(t_i2s_mid, y_i2s * 1.02),
-                        ha='center', va='bottom', fontsize=11, fontweight='bold',
-                        color=color, alpha=0.8)
+            ax.axvline(x=t_split, color='#333333', linestyle='--', alpha=0.7, linewidth=2)
+
+            # F16 peak
+            f16_peak = rss[:phase_boundary].max()
+            # Horizontal dashed line for F16 peak
+            ax.hlines(y=f16_peak, xmin=times[0], xmax=t_split,
+                      color='#C62828', linestyle='--', alpha=0.5, linewidth=1)
+
+            # I2_S peak
+            i2s_peak = rss[phase_boundary:].max()
+            # Horizontal dashed line for I2_S peak
+            ax.hlines(y=i2s_peak, xmin=t_split, xmax=times[-1],
+                      color='#1565C0', linestyle='--', alpha=0.5, linewidth=1)
+
+            # Place both annotations in the center-left empty area
+            ratio = f16_peak / i2s_peak if i2s_peak > 0 else 0
+            text_x = t_split * 0.55  # center of F16 region
+            # F16 box
+            ax.text(text_x, peak * 0.48,
+                    f'F16 peak: {f16_peak:.0f} MB ({f16_peak/1024:.1f} GB)',
+                    ha='center', va='center', fontsize=12, fontweight='bold',
+                    color='#C62828',
+                    bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
+                              edgecolor='#C62828', alpha=0.9))
+            # I2_S box
+            ax.text(text_x, peak * 0.35,
+                    f'I2_S peak: {i2s_peak:.0f} MB ({i2s_peak/1024:.1f} GB)',
+                    ha='center', va='center', fontsize=12, fontweight='bold',
+                    color='#1565C0',
+                    bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
+                              edgecolor='#1565C0', alpha=0.9))
+            # Compression ratio
+            ax.text(text_x, peak * 0.22,
+                    f'Memory saving: {ratio:.1f}x',
+                    ha='center', va='center', fontsize=11,
+                    color='#333333', style='italic',
+                    bbox=dict(boxstyle='round,pad=0.4', facecolor='#FFFFCC',
+                              edgecolor='#999999', alpha=0.9))
+        else:
+            ax.text(times[-1] / 2, peak * 0.5,
+                    f'peak: {peak:.0f} MB ({peak/1024:.1f} GB)',
+                    ha='center', va='center', fontsize=12, fontweight='bold',
+                    color=color,
+                    bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
+                              edgecolor=color, alpha=0.9))
 
         # Parse log file for sub-test annotations
         logpath = filepath.replace('.csv', '.log')
@@ -248,7 +289,7 @@ def main():
 
     ax.set_xlabel('Time (seconds)', fontsize=11, labelpad=35)
     ax.set_ylabel('Memory RSS (MB)', fontsize=11)
-    ax.legend(fontsize=10, loc='upper left')
+    ax.legend(fontsize=10, loc='upper right')
     ax.grid(True, alpha=0.3)
     ax.set_ylim(bottom=0)
 

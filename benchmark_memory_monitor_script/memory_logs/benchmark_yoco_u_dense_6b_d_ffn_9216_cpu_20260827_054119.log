@@ -1,0 +1,48 @@
+[.007] CPU Pinning: NUMA node 0 (cores: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95)
+[.011] ========================================================
+[.016]   YOCO-U-Dense-6B (d_ffn=9216): F16 vs I2_S Benchmark
+[.020]   Config: 20 stored layers (10 self + 10 cross)
+[.024]   d_model=3072, head=32, cross_head=32, kv_head=8
+[.028]   head_dim=128, diff_v3=True, yoco_window=512
+[.032]   Dense FFN (SwiGLU): intermediate_size=9216
+[.035]   yoco_u_iters=3 (self-decoder looped T=3)
+[.039]   Stored params: ~3.0B, Effective compute: ~6B
+[.044]   Threads: 32
+[.048]   CPU Affinity: NUMA node 0
+[.052] ========================================================
+[.056] 
+[.059] --- Model Sizes ---
+[.064]   F16:  5.7G
+[.067]   I2_S: 1.1G
+[.071] 
+[.074] --- F16 Benchmark ---
+[3.840] | model                          |       size |     params | backend    | threads |            test |                  t/s |
+[3.846] | ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+[3.850] | bitnet YOCO-U-6B F16           |   5.63 GiB |     3.02 B | CPU        |      32 |           pp128 |        162.84 ± 0.78 |
+[9.911] | bitnet YOCO-U-6B F16           |   5.63 GiB |     3.02 B | CPU        |      32 |           pp256 |        170.30 ± 0.34 |
+[22.302] | bitnet YOCO-U-6B F16           |   5.63 GiB |     3.02 B | CPU        |      32 |           pp512 |        166.53 ± 0.33 |
+[47.612] | bitnet YOCO-U-6B F16           |   5.63 GiB |     3.02 B | CPU        |      32 |          pp1024 |        162.36 ± 0.87 |
+[58.022] | bitnet YOCO-U-6B F16           |   5.63 GiB |     3.02 B | CPU        |      32 |            tg16 |          4.72 ± 0.00 |
+[78.622] | bitnet YOCO-U-6B F16           |   5.63 GiB |     3.02 B | CPU        |      32 |            tg32 |          4.71 ± 0.01 |
+[119.575] | bitnet YOCO-U-6B F16           |   5.63 GiB |     3.02 B | CPU        |      32 |            tg64 |          4.72 ± 0.00 |
+[201.344] | bitnet YOCO-U-6B F16           |   5.63 GiB |     3.02 B | CPU        |      32 |           tg128 |          4.71 ± 0.00 |
+[365.164] | bitnet YOCO-U-6B F16           |   5.63 GiB |     3.02 B | CPU        |      32 |           tg256 |          4.69 ± 0.00 |
+[365.472] 
+[365.477] build: c7a218c6e (9939)
+[365.482] 
+[365.487] --- I2_S Benchmark ---
+[367.378] | model                          |       size |     params | backend    | threads |            test |                  t/s |
+[367.384] | ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+[367.389] | bitnet YOCO-U-6B I2_S          |   1.07 GiB |     3.02 B | CPU        |      32 |           pp128 |       339.43 ± 23.43 |
+[370.706] | bitnet YOCO-U-6B I2_S          |   1.07 GiB |     3.02 B | CPU        |      32 |           pp256 |       321.72 ± 12.72 |
+[378.951] | bitnet YOCO-U-6B I2_S          |   1.07 GiB |     3.02 B | CPU        |      32 |           pp512 |        251.18 ± 5.41 |
+[395.608] | bitnet YOCO-U-6B I2_S          |   1.07 GiB |     3.02 B | CPU        |      32 |          pp1024 |        249.96 ± 1.33 |
+[397.763] | bitnet YOCO-U-6B I2_S          |   1.07 GiB |     3.02 B | CPU        |      32 |            tg16 |         23.15 ± 0.03 |
+[401.988] | bitnet YOCO-U-6B I2_S          |   1.07 GiB |     3.02 B | CPU        |      32 |            tg32 |         23.11 ± 0.05 |
+[410.429] | bitnet YOCO-U-6B I2_S          |   1.07 GiB |     3.02 B | CPU        |      32 |            tg64 |         22.94 ± 0.12 |
+[427.259] | bitnet YOCO-U-6B I2_S          |   1.07 GiB |     3.02 B | CPU        |      32 |           tg128 |         22.91 ± 0.02 |
+[461.567] | bitnet YOCO-U-6B I2_S          |   1.07 GiB |     3.02 B | CPU        |      32 |           tg256 |         22.43 ± 0.00 |
+[461.640] 
+[461.645] build: c7a218c6e (9939)
+[461.649] 
+[461.653] Done.
