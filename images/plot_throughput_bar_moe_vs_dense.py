@@ -106,13 +106,34 @@ pp_tasks = ['pp128', 'pp256', 'pp512', 'pp1024']
 tg_tasks = ['tg16', 'tg32', 'tg64', 'tg128', 'tg256']
 
 
+def draw_speedup_bracket(ax, x_pos, y_base, y_top, speedup_text, color, width=0.18):
+    """
+    Draw a bracket between two bars (base and top) with speedup text in between.
+    Two horizontal dashed lines at y_base and y_top, with text in the middle.
+    """
+    # Horizontal dashed lines at base and top
+    ax.plot([x_pos - width/2, x_pos + width/2], [y_base, y_base],
+            linestyle='--', color=color, linewidth=1.0, alpha=0.8)
+    ax.plot([x_pos - width/2, x_pos + width/2], [y_top, y_top],
+            linestyle='--', color=color, linewidth=1.0, alpha=0.8)
+    # Vertical connector
+    ax.plot([x_pos, x_pos], [y_base, y_top],
+            linestyle='--', color=color, linewidth=0.8, alpha=0.6)
+    # Speedup text in the middle
+    y_mid = (y_base + y_top) / 2
+    ax.text(x_pos, y_mid, speedup_text, ha='center', va='center',
+            fontsize=6.5, color=color, fontweight='bold',
+            bbox=dict(boxstyle='round,pad=0.15', facecolor='white', edgecolor=color, alpha=0.85, linewidth=0.5))
+
+
 def plot_moe_vs_dense(moe_f16, moe_i2s, dense_f16, dense_i2s,
                       moe_name, dense_name, title, save_path):
     """
-    Compare MoE vs Dense: 4 bars per task (MoE-F16, MoE-I2S, Dense-F16, Dense-I2S).
-    Each subplot = one thread count. Row 0 = Prefill, Row 1 = Decode.
+    Compare MoE vs Dense with speedup brackets between paired bars.
+    Prefill: Dense/MoE speedup (bracket between MoE bar and Dense bar)
+    Decode: MoE/Dense speedup (bracket between Dense bar and MoE bar)
     """
-    fig, axes = plt.subplots(2, 5, figsize=(28, 11))
+    fig, axes = plt.subplots(2, 5, figsize=(28, 12))
     fig.suptitle(title, fontsize=15, fontweight='bold')
 
     colors = {
@@ -121,9 +142,12 @@ def plot_moe_vs_dense(moe_f16, moe_i2s, dense_f16, dense_i2s,
         'dense_f16': '#70AD47',
         'dense_i2s': '#FFC000',
     }
+    # Speedup bracket colors
+    speedup_f16_color = '#9B59B6'   # purple for F16 pair speedup
+    speedup_i2s_color = '#E74C3C'   # red for I2_S pair speedup
 
     for t_idx, t in enumerate(threads):
-        # Row 0: Prefill
+        # ===== Row 0: Prefill =====
         ax_pp = axes[0, t_idx]
         moe_f16_vals = [moe_f16[task][t_idx] for task in pp_tasks]
         moe_i2s_vals = [moe_i2s[task][t_idx] for task in pp_tasks]
@@ -132,32 +156,42 @@ def plot_moe_vs_dense(moe_f16, moe_i2s, dense_f16, dense_i2s,
 
         x = np.arange(len(pp_tasks))
         width = 0.2
-        bars1 = ax_pp.bar(x - 1.5*width, moe_f16_vals, width, label=f'{moe_name} F16',
-                          color=colors['moe_f16'], edgecolor='black', linewidth=0.5)
-        bars2 = ax_pp.bar(x - 0.5*width, moe_i2s_vals, width, label=f'{moe_name} I2_S',
-                          color=colors['moe_i2s'], edgecolor='black', linewidth=0.5)
-        bars3 = ax_pp.bar(x + 0.5*width, dense_f16_vals, width, label=f'{dense_name} F16',
-                          color=colors['dense_f16'], edgecolor='black', linewidth=0.5)
-        bars4 = ax_pp.bar(x + 1.5*width, dense_i2s_vals, width, label=f'{dense_name} I2_S',
-                          color=colors['dense_i2s'], edgecolor='black', linewidth=0.5)
+        ax_pp.bar(x - 1.5*width, moe_f16_vals, width, label=f'{moe_name} F16',
+                  color=colors['moe_f16'], edgecolor='black', linewidth=0.5)
+        ax_pp.bar(x - 0.5*width, moe_i2s_vals, width, label=f'{moe_name} I2_S',
+                  color=colors['moe_i2s'], edgecolor='black', linewidth=0.5)
+        ax_pp.bar(x + 0.5*width, dense_f16_vals, width, label=f'{dense_name} F16',
+                  color=colors['dense_f16'], edgecolor='black', linewidth=0.5)
+        ax_pp.bar(x + 1.5*width, dense_i2s_vals, width, label=f'{dense_name} I2_S',
+                  color=colors['dense_i2s'], edgecolor='black', linewidth=0.5)
 
-        for bars in [bars1, bars2, bars3, bars4]:
-            for bar in bars:
-                h = bar.get_height()
-                ax_pp.text(bar.get_x() + bar.get_width()/2, h + 1, f'{h:.0f}',
-                           ha='center', va='bottom', fontsize=6, rotation=90)
+        # Draw speedup brackets for Prefill (Dense/MoE)
+        for i in range(len(pp_tasks)):
+            # F16 pair: blue (MoE) -> green (Dense)
+            speedup_f16 = dense_f16_vals[i] / moe_f16_vals[i]
+            mid_x_f16 = (x[i] - 1.5*width + x[i] + 0.5*width) / 2  # between blue and green
+            draw_speedup_bracket(ax_pp, mid_x_f16,
+                                 moe_f16_vals[i], dense_f16_vals[i],
+                                 f'{speedup_f16:.1f}x', speedup_f16_color, width=0.35)
+
+            # I2_S pair: orange (MoE) -> yellow (Dense)
+            speedup_i2s = dense_i2s_vals[i] / moe_i2s_vals[i]
+            mid_x_i2s = (x[i] - 0.5*width + x[i] + 1.5*width) / 2  # between orange and yellow
+            draw_speedup_bracket(ax_pp, mid_x_i2s,
+                                 moe_i2s_vals[i], dense_i2s_vals[i],
+                                 f'{speedup_i2s:.1f}x', speedup_i2s_color, width=0.35)
 
         ax_pp.set_title(f'Thread={t} (Prefill)', fontsize=10)
         ax_pp.set_xticks(x)
         ax_pp.set_xticklabels(pp_tasks, fontsize=8)
         ax_pp.grid(True, alpha=0.3, axis='y')
         all_vals = moe_f16_vals + moe_i2s_vals + dense_f16_vals + dense_i2s_vals
-        ax_pp.set_ylim(0, max(all_vals) * 1.3)
+        ax_pp.set_ylim(0, max(all_vals) * 1.25)
         if t_idx == 0:
             ax_pp.set_ylabel('Throughput (tokens/s)', fontsize=9)
-            ax_pp.legend(fontsize=7, loc='upper left')
+            ax_pp.legend(fontsize=6, loc='upper left')
 
-        # Row 1: Decode
+        # ===== Row 1: Decode =====
         ax_tg = axes[1, t_idx]
         moe_f16_vals = [moe_f16[task][t_idx] for task in tg_tasks]
         moe_i2s_vals = [moe_i2s[task][t_idx] for task in tg_tasks]
@@ -165,30 +199,48 @@ def plot_moe_vs_dense(moe_f16, moe_i2s, dense_f16, dense_i2s,
         dense_i2s_vals = [dense_i2s[task][t_idx] for task in tg_tasks]
 
         x = np.arange(len(tg_tasks))
-        bars1 = ax_tg.bar(x - 1.5*width, moe_f16_vals, width, label=f'{moe_name} F16',
-                          color=colors['moe_f16'], edgecolor='black', linewidth=0.5)
-        bars2 = ax_tg.bar(x - 0.5*width, moe_i2s_vals, width, label=f'{moe_name} I2_S',
-                          color=colors['moe_i2s'], edgecolor='black', linewidth=0.5)
-        bars3 = ax_tg.bar(x + 0.5*width, dense_f16_vals, width, label=f'{dense_name} F16',
-                          color=colors['dense_f16'], edgecolor='black', linewidth=0.5)
-        bars4 = ax_tg.bar(x + 1.5*width, dense_i2s_vals, width, label=f'{dense_name} I2_S',
-                          color=colors['dense_i2s'], edgecolor='black', linewidth=0.5)
+        ax_tg.bar(x - 1.5*width, moe_f16_vals, width, label=f'{moe_name} F16',
+                  color=colors['moe_f16'], edgecolor='black', linewidth=0.5)
+        ax_tg.bar(x - 0.5*width, moe_i2s_vals, width, label=f'{moe_name} I2_S',
+                  color=colors['moe_i2s'], edgecolor='black', linewidth=0.5)
+        ax_tg.bar(x + 0.5*width, dense_f16_vals, width, label=f'{dense_name} F16',
+                  color=colors['dense_f16'], edgecolor='black', linewidth=0.5)
+        ax_tg.bar(x + 1.5*width, dense_i2s_vals, width, label=f'{dense_name} I2_S',
+                  color=colors['dense_i2s'], edgecolor='black', linewidth=0.5)
 
-        for bars in [bars1, bars2, bars3, bars4]:
-            for bar in bars:
-                h = bar.get_height()
-                ax_tg.text(bar.get_x() + bar.get_width()/2, h + 0.2, f'{h:.1f}',
-                           ha='center', va='bottom', fontsize=6, rotation=90)
+        # Draw speedup brackets for Decode (MoE/Dense)
+        for i in range(len(tg_tasks)):
+            # F16 pair: green (Dense) -> blue (MoE), MoE is faster
+            speedup_f16 = moe_f16_vals[i] / dense_f16_vals[i]
+            mid_x_f16 = (x[i] - 1.5*width + x[i] + 0.5*width) / 2
+            draw_speedup_bracket(ax_tg, mid_x_f16,
+                                 dense_f16_vals[i], moe_f16_vals[i],
+                                 f'{speedup_f16:.1f}x', speedup_f16_color, width=0.35)
+
+            # I2_S pair: yellow (Dense) -> orange (MoE), MoE is faster
+            speedup_i2s = moe_i2s_vals[i] / dense_i2s_vals[i]
+            mid_x_i2s = (x[i] - 0.5*width + x[i] + 1.5*width) / 2
+            draw_speedup_bracket(ax_tg, mid_x_i2s,
+                                 dense_i2s_vals[i], moe_i2s_vals[i],
+                                 f'{speedup_i2s:.1f}x', speedup_i2s_color, width=0.35)
 
         ax_tg.set_title(f'Thread={t} (Decode)', fontsize=10)
         ax_tg.set_xticks(x)
         ax_tg.set_xticklabels(tg_tasks, fontsize=8)
         ax_tg.grid(True, alpha=0.3, axis='y')
         all_vals = moe_f16_vals + moe_i2s_vals + dense_f16_vals + dense_i2s_vals
-        ax_tg.set_ylim(0, max(all_vals) * 1.3)
+        ax_tg.set_ylim(0, max(all_vals) * 1.25)
         if t_idx == 0:
             ax_tg.set_ylabel('Throughput (tokens/s)', fontsize=9)
-            ax_tg.legend(fontsize=7, loc='upper left')
+            ax_tg.legend(fontsize=6, loc='upper left')
+
+    # Add legend for speedup colors
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], linestyle='--', color=speedup_f16_color, linewidth=1.5, label='F16 speedup'),
+        Line2D([0], [0], linestyle='--', color=speedup_i2s_color, linewidth=1.5, label='I2_S speedup'),
+    ]
+    fig.legend(handles=legend_elements, loc='upper right', fontsize=9, framealpha=0.9)
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
