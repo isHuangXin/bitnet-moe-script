@@ -149,7 +149,13 @@ def main():
         print(f"Auto-detected {len(model_data)} model(s) from {LOGS_DIR}")
 
     fig, ax = plt.subplots(1, 1, figsize=(16, 8))
-    fig.suptitle('Memory Usage During Benchmark (RSS over time)', fontsize=14, fontweight='bold')
+    # Build title with model names
+    model_names = list(model_data.keys())
+    if model_names:
+        title = f'Memory Usage During Benchmark - {" / ".join(model_names)}'
+    else:
+        title = 'Memory Usage During Benchmark (RSS over time)'
+    fig.suptitle(title, fontsize=14, fontweight='bold')
 
     # Determine output filename suffix from input CSV files
     input_files = list(model_data.values())
@@ -198,15 +204,46 @@ def main():
             # Filter only pp/tg events (these are completion timestamps)
             test_events = [(t, lbl) for t, lbl in events
                            if not lbl.startswith('__')]
-            # Draw vertical dashed lines from bottom to top, labels on x-axis
-            for i, (t, lbl) in enumerate(test_events):
-                # Full-height vertical dashed line
-                ax.axvline(x=t, color='gray', linestyle=':', alpha=0.5, linewidth=0.8)
 
-                # Label at the bottom (on x-axis area)
-                ax.annotate(lbl, xy=(t, 0), xytext=(t, -peak * 0.06),
-                            ha='center', va='top', fontsize=7,
-                            color='#333333', rotation=90,
+            # Use alternating colors for adjacent regions
+            bg_colors_pp = ['#E3F2FD', '#BBDEFB']  # light blue shades for prefill
+            bg_colors_tg = ['#FFF3E0', '#FFE0B2']  # light orange shades for decode
+
+            # Build time intervals: from previous event to current event
+            # First interval starts at time 0 (or phase start)
+            all_boundaries = [times[0]] + [t for t, _ in test_events]
+            if phase_boundary is not None:
+                # Also add phase split as a boundary
+                pass
+
+            pp_idx = 0
+            tg_idx = 0
+            for i, (t, lbl) in enumerate(test_events):
+                # Determine start of this test's interval
+                if i == 0:
+                    t_start = times[0]
+                else:
+                    t_start = test_events[i-1][0]
+
+                # Choose background color
+                if lbl.startswith('pp'):
+                    bg = bg_colors_pp[pp_idx % 2]
+                    pp_idx += 1
+                else:
+                    bg = bg_colors_tg[tg_idx % 2]
+                    tg_idx += 1
+
+                # Fill background between intervals
+                ax.axvspan(t_start, t, alpha=0.3, color=bg, zorder=0)
+
+                # Draw vertical dashed line (thicker)
+                ax.axvline(x=t, color='#555555', linestyle='--', alpha=0.6, linewidth=1.2)
+
+                # Label at the middle of the interval, below x-axis
+                t_mid = (t_start + t) / 2
+                ax.annotate(lbl, xy=(t_mid, 0), xytext=(t_mid, -peak * 0.06),
+                            ha='center', va='top', fontsize=9, fontweight='bold',
+                            color='#222222', rotation=90,
                             annotation_clip=False)
 
     ax.set_xlabel('Time (seconds)', fontsize=11, labelpad=35)
