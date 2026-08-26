@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent /
                        "BitNet" / "3rdparty" / "llama.cpp" / "gguf-py"))
 import gguf
 
-logger = logging.getLogger("generate-yoco-moe-dense-3b")
+logger = logging.getLogger("generate-yoco-dense-3b-d_ffn-9216")
 
 # ---------- architecture constants ----------
 N_SELF_LAYERS = 10
@@ -534,7 +534,7 @@ def main():
     )
     parser.add_argument(
         "--output-dir", type=str,
-        default="/data3/huangxin/model_list/yoco-moe-dense-3b",
+        default="/data3/huangxin/model_list/yoco-dense-3b-d_ffn-9216",
         help="Output directory",
     )
     parser.add_argument(
@@ -557,10 +557,10 @@ def main():
     output_base = Path(args.output_dir)
     output_base.mkdir(parents=True, exist_ok=True)
 
-    hf_dir = output_base / "yoco-moe-dense-3b-hf"
+    hf_dir = output_base / "yoco-dense-3b-d_ffn-9216-hf"
     create_hf_model_dir(hf_dir, config)
 
-    f16_dir = output_base / "yoco-moe-dense-3b-bitnet-f16"
+    f16_dir = output_base / "yoco-dense-3b-d_ffn-9216-bitnet-f16"
     f16_dir.mkdir(parents=True, exist_ok=True)
     f16_path = f16_dir / "ggml-model-f16.gguf"
     if args.skip_f16:
@@ -572,7 +572,7 @@ def main():
         generate_f16_gguf(hf_dir, f16_path, config)
 
     if not args.skip_i2s:
-        i2s_dir = output_base / "yoco-moe-dense-3b-bitnet-i2s"
+        i2s_dir = output_base / "yoco-dense-3b-d_ffn-9216-bitnet-i2s"
         i2s_dir.mkdir(parents=True, exist_ok=True)
         i2s_path = i2s_dir / "ggml-model-i2_s.gguf"
         generate_i2s_gguf(f16_path, i2s_path)
