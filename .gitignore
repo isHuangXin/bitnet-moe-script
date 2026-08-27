@@ -1,2 +1,3 @@
 build_script/build_bin_yoco_moe/
+build_script/build_bin_upstream/
 generate_model_script/__pycache__/
