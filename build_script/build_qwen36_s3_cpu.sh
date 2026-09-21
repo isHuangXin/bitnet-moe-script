@@ -1,0 +1,43 @@
+#!/bin/bash
+# Build upstream llama.cpp with optimized Qwen3.6 S3 CPU support.
+# Shared experts: W2A16; routed experts: W2A8; embedding/head: INT8.
+# Rebuild the existing S3 tools in place.
+
+set -e
+
+LLAMA_DIR="/home/huangxin/code_list/BitNet/3rdparty/llama.cpp"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUILD_DIR="${SCRIPT_DIR}/build_bin_qwen36_s3"
+
+CMAKE_COMMON=(
+    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_C_COMPILER=clang
+    -DCMAKE_CXX_COMPILER=clang++
+    -DGGML_NATIVE=ON
+    -DGGML_OPENMP=OFF
+    -DGGML_CUDA=OFF
+    -DGGML_BLAS=OFF
+    -DGGML_AVX512_BF16=OFF
+    -DLLAMA_BUILD_COMMON=ON
+    -DLLAMA_BUILD_TOOLS=ON
+    -DLLAMA_BUILD_EXAMPLES=ON
+    -DLLAMA_BUILD_TESTS=ON
+)
+
+echo "========================================================"
+echo "  Build Qwen3.6 S3 CPU tools (no TL2)"
+echo "  Source: ${LLAMA_DIR}"
+echo "  Output: ${BUILD_DIR}"
+echo "========================================================"
+
+if [ ! -f "${LLAMA_DIR}/src/llama-qwen36-s2.cpp" ] || [ ! -f "${LLAMA_DIR}/convert_hf_to_gguf_s3.py" ]; then
+    echo "ERROR: S3 source support not found in ${LLAMA_DIR}"
+    exit 1
+fi
+
+cmake -S "$LLAMA_DIR" -B "$BUILD_DIR" "${CMAKE_COMMON[@]}"
+cmake --build "$BUILD_DIR" --target llama-bench llama-cli test-qwen36-s2 -j8
+ctest --test-dir "$BUILD_DIR" -R '^test-qwen36-s2$' --output-on-failure --no-tests=error
+
+echo
+echo "Build complete: ${BUILD_DIR}/bin"
