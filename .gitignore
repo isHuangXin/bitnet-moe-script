@@ -6,3 +6,4 @@ build_script/build_bin_qwen36_s4/
 build_script/build_bin_qwen36_w158/
 generate_model_script/__pycache__/
 build_script/build_bin_qwen36_s5/
+build_script/build_bin_qwen36_s6/
