@@ -2,5 +2,7 @@ build_script/build_bin_yoco_moe/
 build_script/build_bin_upstream/
 build_script/build_bin_qwen36_s2/
 build_script/build_bin_qwen36_s3/
+build_script/build_bin_qwen36_s4/
 build_script/build_bin_qwen36_w158/
 generate_model_script/__pycache__/
+build_script/build_bin_qwen36_s5/
