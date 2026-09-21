@@ -8,19 +8,25 @@ LLAMA_DIR="/home/huangxin/code_list/BitNet/3rdparty/llama.cpp"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build_bin_qwen36_s2"
 
+# 通用 cmake 参数
 CMAKE_COMMON=(
     -DCMAKE_BUILD_TYPE=Release
     -DCMAKE_C_COMPILER=clang
     -DCMAKE_CXX_COMPILER=clang++
     -DGGML_NATIVE=ON
     -DGGML_OPENMP=OFF
-    -DGGML_CUDA=OFF
-    -DGGML_BLAS=OFF
-    -DGGML_AVX512_BF16=OFF
+    -DBITNET_X86_TL2=OFF
     -DLLAMA_BUILD_COMMON=ON
     -DLLAMA_BUILD_TOOLS=ON
     -DLLAMA_BUILD_EXAMPLES=ON
-    -DLLAMA_BUILD_TESTS=ON
+    -DGGML_AVX=ON
+    -DGGML_AVX2=ON
+    -DGGML_AVX512=ON
+    -DGGML_AVX512_VBMI=ON
+    -DGGML_AVX512_VNNI=ON
+    -DGGML_AVX512_BF16=ON
+    -DGGML_FMA=ON
+    -DGGML_F16C=ON
 )
 
 echo "========================================================"
