@@ -61,8 +61,8 @@ echo "  BF16: $(du -h "$BF16_MODEL" | cut -f1)"
 echo "  Q4_0: $(du -h "$Q4_0_MODEL" | cut -f1)"
 echo
 
-# echo "--- BF16 Benchmark ---"
-# $TASKSET "$BENCH" -m "$BF16_MODEL" -t "$THREADS" -p 128,256,512,1024 -n 16,32,64,128,256 -r 3 -ngl 0
+echo "--- BF16 Benchmark ---"
+$TASKSET "$BENCH" -m "$BF16_MODEL" -t "$THREADS" -p 128,256,512,1024 -n 16,32,64,128,256 -r 3 -ngl 0
 
 echo
 echo "--- Q4_0 Benchmark ---"
