@@ -66,8 +66,11 @@ echo
 # "${TASKSET[@]}" "$BENCH" -m "$Q4_0_MODEL" -t "$THREADS" -p 128,256,512,1024 -n 16,32,64,128,256 -r 5 -ngl 0 -b 2048 -ub 512 -ctk f16 -ctv f16 -fa auto
 
 echo
-echo "--- BitNet I2_S Benchmark ---"
-"${TASKSET[@]}" "$BENCH" -m "$I2_S_MODEL" -t "$THREADS" -p 128,256,512,1024 -n 16,32,64,128,256 -r 5 -ngl 0 -b 2048 -ub 512 -ctk f16 -ctv f16 -fa auto
+# echo "--- BitNet I2_S Benchmark ---"
+# "${TASKSET[@]}" "$BENCH" -m "$I2_S_MODEL" -t "$THREADS" -p 128,256,512,1024 -n 16,32,64,128,256 -r 5 -ngl 0 -b 2048 -ub 512 -ctk f16 -ctv f16 -fa auto
+
+echo "--- BitNet I2_S Long Sequence Benchmark ---"
+"${TASKSET[@]}" "$BENCH" -m "$I2_S_MODEL" -t "$THREADS" -p 1024,2048,4096,8192,16384,32768,65536 -n 16 -r 5 -ngl 0 -b 2048 -ub 512 -ctk f16 -ctv f16 -fa auto
 
 echo
 echo "Done."

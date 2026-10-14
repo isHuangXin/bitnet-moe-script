@@ -71,3 +71,18 @@ $TASKSET $BENCH -m $I2S_MODEL -t $THREADS -p 128,256,512,1024 -n 16,32,64,128,25
 
 echo
 echo "Done."
+
+# 4线程
+# numactl --physcpubind=0-3 --membind=0 bash /home/huangxin/code_list/bitnet-moe-script/benchmark_script/benchmark_yoco_dense_3b_d_ffn_9216_cpu.sh 4
+
+# 8线程
+# numactl --physcpubind=0-7 --membind=0 bash /home/huangxin/code_list/bitnet-moe-script/benchmark_script/benchmark_yoco_dense_3b_d_ffn_9216_cpu.sh 8
+
+# 12线程
+# numactl --physcpubind=0-11 --membind=0 bash /home/huangxin/code_list/bitnet-moe-script/benchmark_script/benchmark_yoco_dense_3b_d_ffn_9216_cpu.sh 12
+
+# 16线程
+# numactl --physcpubind=0-15 --membind=0 bash /home/huangxin/code_list/bitnet-moe-script/benchmark_script/benchmark_yoco_dense_3b_d_ffn_9216_cpu.sh 16
+
+# 32线程
+# numactl --physcpubind=0-31 --membind=0 bash /home/huangxin/code_list/bitnet-moe-script/benchmark_script/benchmark_yoco_dense_3b_d_ffn_9216_cpu.sh 32

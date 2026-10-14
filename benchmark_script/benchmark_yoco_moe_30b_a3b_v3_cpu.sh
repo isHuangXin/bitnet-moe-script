@@ -61,12 +61,31 @@ echo "  F16:  $(du -h $F16_MODEL | cut -f1)"
 echo "  I2_S: $(du -h $I2S_MODEL | cut -f1)"
 echo
 
-echo "--- F16 Benchmark ---"
-$TASKSET $BENCH -m $F16_MODEL -t $THREADS -p 128,256,512,1024 -n 16,32,64,128,256 -r 3 -ngl 0
+# echo "--- F16 Benchmark ---"
+# $TASKSET $BENCH -m $F16_MODEL -t $THREADS -p 128,256,512,1024 -n 16,32,64,128,256 -r 3 -ngl 0
+
+# echo
+# echo "--- I2_S Benchmark ---"
+# $TASKSET $BENCH -m $I2S_MODEL -t $THREADS -p 128,256,512,1024 -n 16,32,64,128,256 -r 3 -ngl 0 || echo "⚠ I2_S benchmark failed."·
 
 echo
-echo "--- I2_S Benchmark ---"
-$TASKSET $BENCH -m $I2S_MODEL -t $THREADS -p 128,256,512,1024 -n 16,32,64,128,256 -r 3 -ngl 0 || echo "⚠ I2_S benchmark failed."
+echo "--- I2_S Benchmark: Long Sequence ---"
+$TASKSET $BENCH -m $I2S_MODEL -t $THREADS -p 1024,2048,4096,8192,16384,32768,65536 -n 16,256,1024 -r 3 -ngl 0 -b 4096 -ub 1024 || echo "⚠ I2_S benchmark failed."
 
 echo
 echo "Done."
+
+# 4线程
+# numactl --physcpubind=0-3 --membind=0 bash /home/huangxin/code_list/bitnet-moe-script/benchmark_script/benchmark_yoco_moe_30b_a3b_v3_cpu.sh 4
+
+# 8线程
+# numactl --physcpubind=0-7 --membind=0 bash /home/huangxin/code_list/bitnet-moe-script/benchmark_script/benchmark_yoco_moe_30b_a3b_v3_cpu.sh 8
+
+# 12线程
+# numactl --physcpubind=0-11 --membind=0 bash /home/huangxin/code_list/bitnet-moe-script/benchmark_script/benchmark_yoco_moe_30b_a3b_v3_cpu.sh 12
+
+# 16线程
+# numactl --physcpubind=0-15 --membind=0 bash /home/huangxin/code_list/bitnet-moe-script/benchmark_script/benchmark_yoco_moe_30b_a3b_v3_cpu.sh 16
+
+# 32线程
+# numactl --physcpubind=0-31 --membind=0 bash /home/huangxin/code_list/bitnet-moe-script/benchmark_script/benchmark_yoco_moe_30b_a3b_v3_cpu.sh 32
