@@ -70,7 +70,7 @@ echo
 
 echo
 echo "--- I2_S Benchmark: Long Sequence ---"
-$TASKSET $BENCH -m $I2S_MODEL -t $THREADS -p 1024,2048,4096,8192,16384,32768,65536 -n 16,256,1024 -r 3 -ngl 0 -b 4096 -ub 1024 || echo "⚠ I2_S benchmark failed."
+$TASKSET $BENCH -m $I2S_MODEL -t $THREADS -p 128,256,512,1024,2048,4096,8192,16384,32768,65536 -n 16,256,1024,2048 -r 3 -ngl 0 -b 4096 -ub 1024 || echo "⚠ I2_S benchmark failed."
 
 echo
 echo "Done."
