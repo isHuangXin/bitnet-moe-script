@@ -14,14 +14,14 @@
 
 namespace qwen_cache::bench {
 
-enum class Mode { recompute, dram, buffered_file };
+enum class Mode { recompute, dram, direct_file };
 enum class Phase { validation, warmup, measurement };
 
 inline const char * mode_name(Mode mode) {
     switch (mode) {
         case Mode::recompute: return "recompute";
         case Mode::dram: return "dram";
-        case Mode::buffered_file: return "buffered-file";
+        case Mode::direct_file: return "io-uring-direct";
     }
     throw std::invalid_argument("invalid benchmark mode");
 }
@@ -50,7 +50,7 @@ inline void validate_counts(uint32_t repetitions, uint32_t warmup) {
 
 inline std::vector<Trial> make_schedule(uint32_t repetitions, uint32_t warmup) {
     validate_counts(repetitions, warmup);
-    constexpr Mode modes[] = {Mode::recompute, Mode::dram, Mode::buffered_file};
+    constexpr Mode modes[] = {Mode::recompute, Mode::dram, Mode::direct_file};
     std::vector<Trial> schedule;
     schedule.reserve(3 * (repetitions + warmup));
     // Zero-based trial and order; restart the rotation for each phase. The

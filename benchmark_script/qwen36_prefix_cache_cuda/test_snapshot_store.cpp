@@ -222,7 +222,7 @@ void test_memory() {
 
 void test_files(const fs::path & run) {
     const fs::path root = run / "roundtrip";
-    BufferedFileStore files(root, small_limits());
+    DirectFileStore files(root, small_limits());
     common_store_checks(files);
     struct stat st{};
     require(::stat(root.c_str(), &st) == 0 && (st.st_mode & 0777) == 0700, "new store root has mode 0700");
@@ -258,15 +258,80 @@ void test_files(const fs::path & run) {
     Identity mismatch = large.identity;
     mismatch.configuration += "-mismatch";
     require_status(files.get("chunked", mismatch), LookupStatus::incompatible, "chunked checksum on incompatible record");
-    BufferedFileStore fresh(root, small_limits());
+    DirectFileStore fresh(root, small_limits());
     require(fresh.get("first", sample().identity).snapshot->state == sample().state, "fresh store object reads persisted state");
-    require(fresh.get("first", sample().identity).detail.find("buffered-file") != std::string::npos,
-            "reader labels buffered-file rather than physical SSD");
+    require(fresh.get("first", sample().identity).detail.find("io-uring-direct") != std::string::npos,
+            "reader labels io-uring-direct rather than raw physical SSD latency");
+}
+
+void test_direct_io(const fs::path & run) {
+    constexpr size_t alignment = detail::direct_alignment;
+    constexpr size_t chunk = detail::direct_chunk_bytes;
+    constexpr size_t batch = chunk * detail::direct_queue_depth;
+    const fs::path root = run / "direct-io";
+    const Limits limits{32ULL << 20, 128ULL << 20, 0};
+    DirectFileStore files(root, limits);
+    const size_t overhead = static_cast<size_t>(encoded_size(sample(1)) - 1);
+    for (size_t bytes : {alignment - 1, alignment, alignment + 1,
+                         chunk - 1, chunk, chunk + 1, batch - 1, batch, batch + 17}) {
+        Snapshot snapshot = sample(bytes - overhead);
+        for (size_t i = 0; i < snapshot.state.size(); ++i) {
+            snapshot.state[i] = static_cast<uint8_t>((i * 131 + (i >> 12) * 17 + (i >> 20) * 53 + 7) & 255);
+        }
+        const std::string key = "boundary-" + std::to_string(bytes);
+        files.put(key, snapshot);
+        require(fs::file_size(root / (key + ".qcache")) == bytes, "direct I/O does not pad the v1 file format");
+        const auto loaded = files.get(key, snapshot.identity);
+        require_status(loaded, LookupStatus::hit, "aligned/chunk/queue boundary roundtrip");
+        require(loaded.snapshot->state == snapshot.state, "out-of-order completions retain byte order across batches");
+        if (bytes == batch + 17) {
+            Identity different = snapshot.identity;
+            different.configuration += "-mismatch";
+            require_status(files.get(key, different), LookupStatus::incompatible, "multi-batch incompatible record still validates CRC");
+        }
+    }
+    Snapshot metadata = sample(chunk + 17);
+    metadata.identity.configuration.assign(chunk - 100, 'c');
+    metadata.identity.prefix_tokens.resize(300000, -17);
+    metadata.identity.processed_tokens = metadata.identity.prefix_tokens.size();
+    files.put("metadata-boundary", metadata);
+    const auto loaded = files.get("metadata-boundary", metadata.identity);
+    require_status(loaded, LookupStatus::hit, "metadata spans direct-read chunks");
+    require(loaded.snapshot->identity == metadata.identity && loaded.snapshot->state == metadata.state,
+            "unaligned metadata/state boundaries retain the unchanged envelope");
+
+    const fs::path changing = root / ("boundary-" + std::to_string(batch + 17) + ".qcache");
+    detail::Fd fd(::open(changing.c_str(), O_RDONLY | O_DIRECT | O_CLOEXEC));
+    require(fd.get() >= 0 && (::fcntl(fd.get(), F_GETFL) & O_DIRECT) != 0, "test reader really uses O_DIRECT");
+    detail::Fd mutator(::open(changing.c_str(), O_WRONLY | O_CLOEXEC));
+    require(mutator.get() >= 0, "open owned changing fixture");
+    {
+        detail::DirectReader reader(fd.get(), batch + 17);
+        std::vector<uint8_t> first(batch);
+        reader.read_all(first.data(), first.size());
+        require(::ftruncate(mutator.get(), batch + 1) == 0, "truncate owned fixture between read batches");
+        uint8_t byte = 0;
+        throws([&] { reader.read_all(&byte, 1); }, "short CQE after concurrent truncation is rejected");
+    }
+    {
+        detail::DirectReader reader(fd.get(), batch + 1);
+        std::vector<uint8_t> all(batch + 1);
+        reader.read_all(all.data(), all.size());
+        require(::ftruncate(mutator.get(), batch + 2) == 0, "append after prefetch to owned fixture");
+        throws([&] { reader.finish(); }, "EOF validation detects growth after prefetch");
+    }
+    throws([&] {
+        detail::DirectReader invalid(-1, batch);
+        uint8_t byte = 0;
+        invalid.read_all(&byte, 1);
+    }, "failed CQE drains remaining requests before buffer cleanup");
+    const auto valid = files.get("boundary-" + std::to_string(chunk), sample(chunk - overhead).identity);
+    require_status(valid, LookupStatus::hit, "new lookup succeeds after direct-I/O errors");
 }
 
 void test_corruption(const fs::path & run) {
     const fs::path root = run / "corruption";
-    BufferedFileStore files(root, small_limits());
+    DirectFileStore files(root, small_limits());
     const Snapshot snapshot = sample(37);
     files.put("baseline", snapshot);
     const auto original = read_fixture(root / "baseline.qcache");
@@ -335,11 +400,11 @@ void test_corruption(const fs::path & run) {
                    "identity checked independently of CRC");
     auto lower = small_limits();
     lower.max_blob_bytes = original.size() - 1;
-    BufferedFileStore bounded(root, lower);
+    DirectFileStore bounded(root, lower);
     require_status(bounded.get("baseline", snapshot.identity), LookupStatus::corrupt, "reader applies blob bound");
     lower = small_limits();
     lower.max_store_bytes = original.size() - 1;
-    BufferedFileStore quota_bounded(root, lower);
+    DirectFileStore quota_bounded(root, lower);
     require_status(quota_bounded.get("baseline", snapshot.identity), LookupStatus::corrupt, "reader applies entry store bound");
 }
 
@@ -356,7 +421,7 @@ void test_quota_and_staging(const fs::path & run) {
     throws([&] { memory.put("larger", larger); }, "blob quota includes metadata");
     require_status(memory.get("one", snapshot.identity), LookupStatus::hit, "quota failure retains DRAM state");
     const fs::path root = run / "quota";
-    BufferedFileStore files(root, limits);
+    DirectFileStore files(root, limits);
     files.put("one", snapshot);
     const fs::path unfinished = root / ".qcache-tmp-interrupted";
     write_fixture(unfinished, {9});
@@ -369,7 +434,7 @@ void test_quota_and_staging(const fs::path & run) {
     throws([&] { files.put("three", snapshot); }, "published file quota enforced");
     throws([&] { files.put("larger", larger); }, "file blob quota includes metadata");
     require_status(files.get("one", snapshot.identity), LookupStatus::hit, "quota failure retains published state");
-    BufferedFileStore fresh(root, limits);
+    DirectFileStore fresh(root, limits);
     throws([&] { fresh.put("three", snapshot); }, "fresh writer accounts for published bytes");
     const auto before = read_fixture(root / "one.qcache");
     Snapshot conflict = snapshot;
@@ -379,11 +444,11 @@ void test_quota_and_staging(const fs::path & run) {
     Limits reserved = small_limits();
     reserved.disk_reserve_bytes = UINT64_MAX;
     const fs::path reserve_root = run / "reserve";
-    BufferedFileStore reserve(reserve_root, reserved);
+    DirectFileStore reserve(reserve_root, reserved);
     throws([&] { reserve.put("blocked", snapshot); }, "statvfs disk reserve enforced without overflow");
     require(fs::is_empty(reserve_root), "reserve failure creates no files");
     const fs::path incomplete_root = run / "incomplete";
-    BufferedFileStore incomplete(incomplete_root, small_limits());
+    DirectFileStore incomplete(incomplete_root, small_limits());
     auto partial = before;
     partial.resize(partial.size() / 2);
     write_fixture(incomplete_root / ".qcache-tmp-unfinished", partial);
@@ -395,7 +460,7 @@ void test_quota_and_staging(const fs::path & run) {
 
 void test_atomic_failure_cleanup(const fs::path & run) {
     const fs::path root = run / "publication";
-    BufferedFileStore files(root, small_limits());
+    DirectFileStore files(root, small_limits());
     const Snapshot snapshot = sample(31);
     files.put("existing", snapshot);
     const auto original = read_fixture(root / "existing.qcache");
@@ -454,7 +519,7 @@ void test_atomic_failure_cleanup(const fs::path & run) {
 
 void test_path_safety(const fs::path & run) {
     const fs::path root = run / "safety";
-    BufferedFileStore files(root, small_limits());
+    DirectFileStore files(root, small_limits());
     const auto snapshot = sample();
     files.put("valid", snapshot);
     const fs::path external = run / "external-owned-fixture";
@@ -479,22 +544,22 @@ void test_path_safety(const fs::path & run) {
     const fs::path public_root = run / "public";
     require(::mkdir(public_root.c_str(), 0755) == 0, "create own nonprivate root fixture");
     require(::chmod(public_root.c_str(), 0755) == 0, "set exact nonprivate fixture mode despite umask");
-    throws([&] { BufferedFileStore invalid(public_root, small_limits()); }, "existing nonprivate root rejected");
+    throws([&] { DirectFileStore invalid(public_root, small_limits()); }, "existing nonprivate root rejected");
     struct stat st{};
     require(::stat(public_root.c_str(), &st) == 0 && (st.st_mode & 0777) == 0755, "existing root is never chmod'ed");
     const fs::path linked_root = run / "linked-root";
     require(::symlink(root.c_str(), linked_root.c_str()) == 0, "create own linked root fixture");
-    throws([&] { BufferedFileStore invalid(linked_root, small_limits()); }, "symlink root rejected");
-    throws([&] { BufferedFileStore invalid(linked_root / "child", small_limits()); }, "symlink ancestor rejected");
-    throws([&] { BufferedFileStore invalid(root / ".." / "other", small_limits()); }, "parent traversal rejected");
-    throws([&] { BufferedFileStore invalid(external / "child", small_limits()); }, "nondirectory parent rejected");
-    throws([&] { BufferedFileStore invalid("", small_limits()); }, "empty root rejected");
+    throws([&] { DirectFileStore invalid(linked_root, small_limits()); }, "symlink root rejected");
+    throws([&] { DirectFileStore invalid(linked_root / "child", small_limits()); }, "symlink ancestor rejected");
+    throws([&] { DirectFileStore invalid(root / ".." / "other", small_limits()); }, "parent traversal rejected");
+    throws([&] { DirectFileStore invalid(external / "child", small_limits()); }, "nondirectory parent rejected");
+    throws([&] { DirectFileStore invalid("", small_limits()); }, "empty root rejected");
     require_status(files.get("valid", snapshot.identity), LookupStatus::hit, "valid entry survives safety tests");
 }
 
 int child_read(const fs::path & root) {
     require_artifact_path(root);
-    BufferedFileStore reader(root, small_limits());
+    DirectFileStore reader(root, small_limits());
     const auto expected = sample(8193);
     const auto result = reader.get("persisted", expected.identity);
     require_status(result, LookupStatus::hit, "fresh exec reader hit");
@@ -506,7 +571,7 @@ int child_read(const fs::path & root) {
 void test_fresh_process(const fs::path & run) {
     const fs::path root = run / "fresh-process";
     {
-        BufferedFileStore writer(root, small_limits());
+        DirectFileStore writer(root, small_limits());
         writer.put("persisted", sample(8193));
     }
     std::cout.flush();
@@ -618,7 +683,7 @@ void fake_aba(Store & store) {
 void test_state_protocol(const fs::path & run) {
     MemoryStore memory(small_limits());
     fake_aba(memory);
-    BufferedFileStore files(run / "fake-model", small_limits());
+    DirectFileStore files(run / "fake-model", small_limits());
     fake_aba(files);
     const Limits limits{32, 64, 0};
     size_t export_calls = 0;
@@ -728,7 +793,7 @@ void test_benchmark_schedule() {
     using bench::Phase;
     require(std::string(bench::mode_name(Mode::recompute)) == "recompute", "recompute label");
     require(std::string(bench::mode_name(Mode::dram)) == "dram", "DRAM label");
-    require(std::string(bench::mode_name(Mode::buffered_file)) == "buffered-file", "buffered-file label remains honest");
+    require(std::string(bench::mode_name(Mode::direct_file)) == "io-uring-direct", "direct-I/O mode label remains honest");
     require(std::string(bench::phase_name(Phase::validation)) == "validation" &&
             std::string(bench::phase_name(Phase::warmup)) == "warmup" &&
             std::string(bench::phase_name(Phase::measurement)) == "measurement", "phase labels");
@@ -786,7 +851,7 @@ void test_benchmark_rates() {
     require_close(*full.generation_after_first_tps, 3000.0 / 18, "post-first numerator D-1 and sample-to-sample denominator");
     require_close(full.end_to_end_output_tps, 4000.0 / 36, "end-to-end output denominator is last sample, not request end");
     const bench::Timings cached{0, 4, 12, 15, 30, 40, 20};
-    for (Mode mode : {Mode::dram, Mode::buffered_file}) {
+    for (Mode mode : {Mode::dram, Mode::direct_file}) {
         const auto hit = bench::derive_rates(mode, 8, 2, 4, cached);
         require_close(hit.actual_prefill_eval_tps, 500, "hit evaluates only S tokens, not cached P");
         require_close(hit.effective_prompt_tps, 10000.0 / 12, "hit effective input still counts the full prompt");
@@ -840,7 +905,7 @@ void test_benchmark_rates() {
     bad = cached; bad.prefix_ms = 1;
     throws([&] { (void)bench::derive_rates(Mode::dram, 8, 2, 4, bad); }, "cache path cannot claim prefix evaluation time");
     bad = cached; bad.prefix_ms = -1;
-    throws([&] { (void)bench::derive_rates(Mode::buffered_file, 8, 2, 4, bad); }, "negative cache prefix time rejected");
+    throws([&] { (void)bench::derive_rates(Mode::direct_file, 8, 2, 4, bad); }, "negative cache prefix time rejected");
     bad = cached; bad.tail_ms = std::numeric_limits<double>::denorm_min();
     throws([&] { (void)bench::derive_rates(Mode::dram, 8, 2, 4, bad); }, "finite tiny denominator yielding infinite rate rejected");
     throws([&] { (void)bench::derive_rates(static_cast<Mode>(99), 8, 2, 4, recompute); }, "unknown mode cannot yield rates");
@@ -851,7 +916,7 @@ void test_prefill_only_rates() {
     static_assert(std::is_same<decltype(bench::Rates{}.conditioned_decode_forward_tps), std::optional<double>>::value,
                   "decode-forward throughput must represent pure-PP NA without NaN");
     const bench::Timings pure{6, 4, 15, 18, 18, 18, 0};
-    for (Mode mode : {Mode::recompute, Mode::dram, Mode::buffered_file}) {
+    for (Mode mode : {Mode::recompute, Mode::dram, Mode::direct_file}) {
         auto timings = pure;
         if (mode != Mode::recompute) timings.prefix_ms = 0;
         const auto rates = bench::derive_rates(mode, 262143, 1, 0, timings);
@@ -1022,7 +1087,7 @@ void test_repeated_fake_benchmark(const fs::path & run) {
     const Identity identity{"repeated-fake-complete-state;model=none;backend=host", prefix_a, prefix_a.size()};
     MemoryStore memory(small_limits());
     const fs::path root = run / "repeated-fake-benchmark";
-    BufferedFileStore files(root, small_limits());
+    DirectFileStore files(root, small_limits());
     // Exactly one publication per backend before any warmup/measurement.
     memory.put("repeat-A", {identity, state});
     files.put("repeat-A", {identity, state});
@@ -1067,7 +1132,7 @@ void test_repeated_fake_benchmark(const fs::path & run) {
         const auto rates = bench::derive_rates(trial.mode, prefix_a.size(), suffix.size(), D, timings);
         observations.push_back({trial, true, rates.actual_prefill_eval_tps});
     }
-    for (Mode mode : {Mode::recompute, Mode::dram, Mode::buffered_file}) {
+    for (Mode mode : {Mode::recompute, Mode::dram, Mode::direct_file}) {
         require(hits[static_cast<size_t>(mode)] == 5, "each mode completes two warmups and three measurements");
         require_summary(bench::summarize(mode, 3, observations), "pass", 3, 3);
     }
@@ -1098,7 +1163,7 @@ void test_prefill_only_fake(const fs::path & run) {
     const Identity identity{"pure-prefill-fake;model=none;backend=host", prefix_a, prefix_a.size()};
     MemoryStore memory(small_limits());
     const fs::path root = run / "pure-prefill-fake";
-    BufferedFileStore files(root, small_limits());
+    DirectFileStore files(root, small_limits());
     memory.put("pure-A", {identity, prefix_state});
     files.put("pure-A", {identity, prefix_state});
     const auto published = read_fixture(root / "pure-A.qcache");
@@ -1158,7 +1223,8 @@ int main(int argc, char ** argv) {
             std::cout << "[PASS] " << label << '\n';
         };
         group("DRAM immutable roundtrips / identity / duplicates / input bounds", test_memory);
-        group("buffered-file roundtrips / canonical LE / streamed data", [&] { test_files(run.path); });
+        group("io-uring-direct roundtrips / canonical LE / streamed data", [&] { test_files(run.path); });
+        group("O_DIRECT alignment / chunk and queue boundaries / CQE errors / changing files", [&] { test_direct_io(run.path); });
         group("corruption / truncation / trailing bytes / versions / length bounds", [&] { test_corruption(run.path); });
         group("quota / disk reserve / staging / atomic publication / I/O failure cleanup", [&] {
             test_quota_and_staging(run.path);
@@ -1177,7 +1243,7 @@ int main(int argc, char ** argv) {
             test_prefill_only_rates();
             test_prefill_only_fake(run.path);
         });
-        std::cout << "host tests passed: 13 groups, " << checks << " parent-process checks\n"
+        std::cout << "host tests passed: 14 groups, " << checks << " parent-process checks\n"
                   << "new benchmark model parity/performance/256K: not run; no-model host tests only; prior run history unchanged\n";
         return 0;
     } catch (const std::exception & error) {

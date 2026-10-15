@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the fixed two-model pure-PP protocol and expose one verified wide table."""
+"""Run the pure-PP protocol for selected models and expose one verified wide table."""
 import argparse
 import csv
 from dataclasses import dataclass
@@ -17,7 +17,7 @@ LLAMA_DIR = Path("/home/huangxin/code_list/BitNet/3rdparty/llama.cpp")
 LIB_DIR = Path(__file__).resolve().parents[2] / "build_script/build_bin_qwen36_cuda/bin"
 MANIFEST = ROOT / "bin/runtime.sha256"
 EXPECTED_COMMIT = "373971d12e8bf094fac91667e42d732b5051f3bd"
-MODES = ("recompute", "dram", "buffered-file")
+MODES = ("recompute", "dram", "io-uring-direct")
 METRICS = {
     "ttft_ms": "ms", "actual_prefill_eval_tps": "tokens/s", "effective_prompt_tps": "tokens/s",
     "conditioned_decode_forward_tps": "tokens/s", "generation_after_first_tps": "tokens/s",
@@ -31,7 +31,7 @@ WIDE_FIELDS = (
     "actual_prefill_mean_tps", "actual_prefill_stddev_tps",
     "effective_prefill_mean_tps", "effective_prefill_stddev_tps", "ctx", "run_dir",
 )
-TABLE_FORMAT = "{:<6} | {:<9} | {:<13} | {:>4} | {:>23} | {:>23} | {:>26}"
+TABLE_FORMAT = "{:<6} | {:<9} | {:<15} | {:>4} | {:>23} | {:>23} | {:>26}"
 TABLE_HEADER = TABLE_FORMAT.format("model", "test", "cache", "n", "TTFT ms", "prefill eval t/s", "effective prompt t/s")
 
 
@@ -43,12 +43,16 @@ def decimal(text, low, high):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("probe", "bf16-model", "q4-model", "pp-lengths"):
+    for name in ("probe", "pp-lengths"):
         parser.add_argument("--" + name, required=True)
+    for name in ("bf16-model", "q4-model"):
+        parser.add_argument("--" + name)
     for name, default in (("threads", "8"), ("gpu-id", "0"), ("repetitions", "3"), ("warmup", "1")):
         parser.add_argument("--" + name, default=default)
     args = parser.parse_args(argv)
     try:
+        if args.bf16_model is None and args.q4_model is None:
+            raise ValueError("Specify at least one of --bf16-model or --q4-model")
         args.threads = decimal(args.threads, 1, 2147483647)
         args.gpu_id = decimal(args.gpu_id, 0, 2147483647)
         args.repetitions = decimal(args.repetitions, 1, 1000)
@@ -57,6 +61,10 @@ def parse_args(argv=None):
         if len(set(args.pp_lengths)) != len(args.pp_lengths):
             raise ValueError("PP lengths must be unique")
         for path in (args.probe, args.bf16_model, args.q4_model):
+            if path is None:
+                continue
+            if not path:
+                raise ValueError("Paths cannot be empty")
             if any(char in path for char in "\t\r\n"):
                 raise ValueError("Paths cannot contain TSV control characters")
     except ValueError as error:
@@ -130,7 +138,8 @@ def read_case(run_dir, model, pp, args, runtime_id):
         "sampled_outputs_per_request": "1", "decode_forwards_per_request": "0",
         "repetitions_per_mode": str(args.repetitions), "warmup_per_mode": str(args.warmup),
         "model": str(model.path), "model_sha256": model.digest, "runtime_id": runtime_id,
-        "cuda_visible_devices": str(args.gpu_id),
+        "threads": str(args.threads), "cuda_visible_devices": str(args.gpu_id),
+        "io_mode": "io_uring+O_DIRECT", "storage_backend": "ssd",
     }
     for key, value in required.items():
         if metadata.get(key) != value:
@@ -192,11 +201,13 @@ def run(args):
         raise ValueError("Fixed probe is absent from runtime manifest")
     inputs = []
     for name, path in (("BF16", args.bf16_model), ("Q4_0", args.q4_model)):
+        if path is None:
+            continue
         path = Path(path).resolve(strict=True)
         if any(char in str(path) for char in "\t\r\n"):
             raise ValueError("Canonical model paths cannot contain TSV control characters")
         inputs.append((name, path, file_identity(path)))
-    print("Preparing runtime and both model hashes outside request timings.", flush=True)
+    print("Preparing runtime and selected model hashes outside request timings.", flush=True)
     runtime_id = sha256(MANIFEST)
     check_runtime(runtime_id)
     models = []
@@ -213,6 +224,17 @@ def run(args):
         (sweep / name).mkdir(mode=0o700)
     with exclusive_text(sweep / "runtime-id") as handle:
         handle.write(runtime_id + "\n")
+    with exclusive_text(sweep / "metadata.tsv") as handle:
+        csv.writer(handle, delimiter="\t", lineterminator="\n").writerows([
+            ("key", "value"),
+            ("pp_lengths", ",".join(map(str, args.pp_lengths))),
+            ("threads", str(args.threads)),
+            ("cuda_visible_devices", str(args.gpu_id)),
+            ("repetitions_per_mode", str(args.repetitions)),
+            ("warmup_per_mode", str(args.warmup)),
+            ("model_groups", ",".join(model.name for model in models)),
+            ("runtime_id", runtime_id),
+        ])
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
     env["LD_LIBRARY_PATH"] = str(LIB_DIR) + (":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")

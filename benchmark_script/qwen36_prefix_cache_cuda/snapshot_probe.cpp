@@ -66,9 +66,9 @@ static void usage() {
         << "  --repetitions 3    --warmup 1        (each 1..1000, per mode)\n"
         << "  --max-blob-mib 8192 --max-store-mib 16384 --disk-reserve-mib 16384\n"
         << "  --help\n"
-        << "Normal execution loads a model and runs recompute/DRAM/buffered-file tests.\n"
+        << "Normal execution loads a model and runs recompute/DRAM/io-uring-direct tests.\n"
         << "Set CUDA_VISIBLE_DEVICES to exactly one authorized GPU; internal main_gpu=0.\n"
-        << "The buffered-file test is NOT a physical-SSD latency measurement.\n"
+        << "O_DIRECT bypasses OS page cache; this is NOT a raw-SSD latency measurement.\n"
         << "Help and argument validation do not initialize llama/CUDA or load a model.\n";
 }
 
@@ -310,7 +310,7 @@ static bool write_summaries(Table & table, const std::vector<Result> & records, 
     struct Row { bench::Mode mode; size_t metric_index; bench::Summary summary; };
     std::vector<Row> rows;
     bool complete = !force_failed;
-    for (auto mode : {bench::Mode::recompute, bench::Mode::dram, bench::Mode::buffered_file}) {
+    for (auto mode : {bench::Mode::recompute, bench::Mode::dram, bench::Mode::direct_file}) {
         for (size_t i = 0; i < metrics.size(); ++i) {
             std::vector<bench::Observation> observations;
             for (const auto & r : records) {
@@ -354,7 +354,7 @@ static bool write_summaries(Table & table, const std::vector<Result> & records, 
     if (!prefill_only) std::cout << "decode-forward t/s";
     std::cout << '\n';
     const size_t displayed_metrics = prefill_only ? 3 : 4;
-    for (auto mode : {bench::Mode::recompute, bench::Mode::dram, bench::Mode::buffered_file}) {
+    for (auto mode : {bench::Mode::recompute, bench::Mode::dram, bench::Mode::direct_file}) {
         std::vector<const bench::Summary *> selected;
         for (const auto & row : rows) {
             if (row.mode == mode && row.metric_index < displayed_metrics) selected.push_back(&row.summary);
@@ -370,7 +370,7 @@ static bool write_summaries(Table & table, const std::vector<Result> & records, 
     } else {
         std::cout << "Decode is prefix-conditioned greedy forward work, not independent llama-bench tg.\n";
     }
-    std::cout << "Wall latency includes host validation; buffered-file reads may hit OS page cache.\n";
+    std::cout << "Wall latency includes host validation. O_DIRECT bypasses OS page cache; this is not raw SSD latency.\n";
     return complete;
 }
 
@@ -710,8 +710,16 @@ static int run(const Options & o) {
     metadata.row({"decode_forwards_per_request", std::to_string(o.decode_tokens)});
     metadata.row({"repetitions_per_mode", std::to_string(o.repetitions)});
     metadata.row({"warmup_per_mode", std::to_string(o.warmup)});
+    metadata.row({"threads", std::to_string(o.threads)});
     metadata.row({"experiment", "single-prefix A/B/A; cross-request complete host snapshots; not live KV paging"});
-    metadata.row({"file_backend", "buffered-file; physical SSD latency not established"});
+    metadata.row({"file_backend", "io-uring-direct; O_DIRECT bypasses OS page cache; not raw SSD latency"});
+    // Storage configuration for the file-snapshot backend only.
+    metadata.row({"storage_backend", "ssd"});
+    metadata.row({"io_mode", "io_uring+O_DIRECT"});
+    metadata.row({"io_queue_depth", std::to_string(qwen_cache::detail::direct_queue_depth)});
+    metadata.row({"io_chunk_bytes", std::to_string(qwen_cache::detail::direct_chunk_bytes)});
+    metadata.row({"io_alignment_bytes", std::to_string(qwen_cache::detail::direct_alignment)});
+    metadata.row({"file_write_mode", "buffered+fsync"});
     metadata.row({"model", fs::canonical(o.model).string()});
     metadata.row({"model_sha256", o.model_sha256});
     metadata.row({"runtime_id", o.runtime_id});
@@ -727,7 +735,7 @@ static int run(const Options & o) {
     metadata.row({"parity_rtol", "0.0001"});
     metadata.row({"timing_scope", "tokens-ready through first greedy sample/completed fixed-count continuation; excludes model/hash startup and parity comparison"});
     metadata.row({"timing_design", "golden reference excluded; all equal per-mode warmups before measurements; rotating order per phase-local round"});
-    metadata.row({"schedule", "mode=(trial+order)%3 over recompute,dram,buffered-file; zero-based indices; B interference before every request outside request timing"});
+    metadata.row({"schedule", "mode=(trial+order)%3 over recompute,dram,io-uring-direct; zero-based indices; B interference before every request outside request timing"});
     metadata.row({"statistics", "arithmetic mean of per-trial values; sample stddev n-1; singleton stddev=0; no failed/incomplete sample filtering"});
     metadata.row({"measurement_scope", "instrumented single-length synthetic requests, not server/network latency or raw independent llama-bench pp/tg"});
     metadata.row({"cache_setup_scope", "each store prepared once; capture/export/publication excluded from hit request timing and recorded separately"});
@@ -743,7 +751,7 @@ static int run(const Options & o) {
         ? "full post-prefill logits and one sampled first token; no multi-token continuation tested"
         : "full post-suffix logits and fixed-count greedy continuation, finite checks after every evaluated token"});
     metadata.row({"reset_scope", "one zeroing reset per request, timed separately from import; failed imports are cleared again"});
-    metadata.row({"file_cache_policy", "buffered rereads after warmup; OS page-cache residency uncontrolled; no physical-SSD claim"});
+    metadata.row({"file_cache_policy", "O_DIRECT reads bypass OS page cache; device/controller caches uncontrolled; no buffered fallback or raw-SSD latency claim"});
     Result current;
     std::vector<Result> records;
     bool current_recorded = false;
@@ -817,7 +825,7 @@ static int run(const Options & o) {
         write_result(results, current, o);
 
         qwen_cache::MemoryStore memory(o.limits);
-        qwen_cache::BufferedFileStore files(o.output_dir / "cache", o.limits);
+        qwen_cache::DirectFileStore files(o.output_dir / "cache", o.limits);
         current = Result{};
         current.mode = "dram";
         current_recorded = false;
@@ -825,7 +833,7 @@ static int run(const Options & o) {
         const Result dram_setup = current;
         write_setup(metadata, dram_setup);
         current = Result{};
-        current.mode = "buffered-file";
+        current.mode = "io-uring-direct";
         prepare_snapshot(files, o, ctx.get(), evaluator, identity, a, current, o.output_dir / "cache");
         const Result file_setup = current;
         write_setup(metadata, file_setup);
@@ -844,7 +852,7 @@ static int run(const Options & o) {
                 case bench::Mode::dram:
                     output = cached_request(memory, o, ctx.get(), evaluator, vocab, identity, a, dram_setup, current);
                     break;
-                case bench::Mode::buffered_file:
+                case bench::Mode::direct_file:
                     output = cached_request(files, o, ctx.get(), evaluator, vocab, identity, a, file_setup, current);
                     break;
             }
@@ -860,7 +868,7 @@ static int run(const Options & o) {
             current.reused_tokens = passed && trial.mode != bench::Mode::recompute ? o.prefix_tokens : 0;
             current.detail = comparison.detail;
             if (!current.tokens_equal) current.detail += "; greedy continuation mismatch";
-            if (trial.mode == bench::Mode::buffered_file) current.detail += "; buffered I/O after warmup, not physical-SSD latency";
+            if (trial.mode == bench::Mode::direct_file) current.detail += "; io_uring+O_DIRECT bypasses OS page cache; load includes allocation/copy/CRC, not raw SSD latency";
             if (passed) derive_metrics(current, o, trial.mode);
             records.push_back(current);
             current_recorded = true;

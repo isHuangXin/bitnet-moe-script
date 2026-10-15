@@ -9,6 +9,7 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -23,6 +24,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/fs.h>
+#include <liburing.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
@@ -72,8 +74,7 @@ inline constexpr uint64_t max_configuration_bytes = 1ULL << 20;
 inline constexpr uint64_t max_prefix_tokens = 1ULL << 20;
 inline constexpr std::array<uint8_t, 8> magic = {{'Q', 'W', 'N', 'S', 'N', 'A', 'P', 0}};
 
-inline std::runtime_error io_error(const std::string & operation) {
-    const int error = errno;
+inline std::runtime_error io_error(const std::string & operation, int error = errno) {
     return std::runtime_error(operation + ": " + std::strerror(error));
 }
 
@@ -231,6 +232,114 @@ inline void read_all(int fd, uint8_t * data, size_t size) {
     }
 }
 
+inline constexpr size_t direct_alignment = 4096;
+inline constexpr size_t direct_chunk_bytes = 1U << 20;
+inline constexpr unsigned direct_queue_depth = 8;
+
+class DirectReader {
+public:
+    DirectReader(int fd, uint64_t file_size) : fd_(fd), file_size_(file_size) {
+        if (file_size == 0) throw std::runtime_error("empty direct-I/O snapshot");
+        capacity_ = static_cast<size_t>(std::min<uint64_t>(file_size, direct_chunk_bytes * direct_queue_depth));
+        capacity_ = (capacity_ + direct_alignment - 1) / direct_alignment * direct_alignment;
+        void * buffer = nullptr;
+        const int allocation = ::posix_memalign(&buffer, direct_alignment, capacity_);
+        if (allocation != 0) throw io_error("allocate direct-I/O buffer", allocation);
+        buffer_.reset(static_cast<uint8_t *>(buffer));
+        const int result = ::io_uring_queue_init(direct_queue_depth, &ring_, 0);
+        if (result < 0) throw io_error("initialize snapshot io_uring", -result);
+    }
+    ~DirectReader() {
+        // An error in one CQE must not free buffers still used by other reads.
+        while (pending_ != 0) {
+            io_uring_cqe * cqe = nullptr;
+            const int result = ::io_uring_wait_cqe(&ring_, &cqe);
+            if (result == -EINTR) continue;
+            if (result < 0) break;
+            ::io_uring_cqe_seen(&ring_, cqe);
+            --pending_;
+        }
+        ::io_uring_queue_exit(&ring_);
+    }
+    DirectReader(const DirectReader &) = delete;
+    DirectReader & operator=(const DirectReader &) = delete;
+
+    void read_all(uint8_t * data, size_t size) {
+        while (size != 0) {
+            if (cursor_ == available_) refill();
+            const size_t count = std::min(size, available_ - cursor_);
+            std::memcpy(data, buffer_.get() + cursor_, count);
+            data += count;
+            size -= count;
+            cursor_ += count;
+        }
+    }
+
+    void finish() const {
+        struct stat st{};
+        if (::fstat(fd_, &st) != 0) throw io_error("check direct-I/O snapshot EOF");
+        if (next_offset_ != file_size_ || cursor_ != available_ ||
+            st.st_size < 0 || static_cast<uint64_t>(st.st_size) != file_size_) {
+            throw std::runtime_error("snapshot length changed or trailing data");
+        }
+    }
+
+private:
+    void refill() {
+        if (next_offset_ == file_size_) throw std::runtime_error("truncated direct-I/O snapshot");
+        const size_t bytes = static_cast<size_t>(std::min<uint64_t>(capacity_, file_size_ - next_offset_));
+        std::array<size_t, direct_queue_depth> expected{};
+        unsigned requests = 0;
+        for (size_t offset = 0; offset < bytes; offset += direct_chunk_bytes) {
+            const size_t count = std::min(direct_chunk_bytes, bytes - offset);
+            const size_t aligned = (count + direct_alignment - 1) / direct_alignment * direct_alignment;
+            io_uring_sqe * sqe = ::io_uring_get_sqe(&ring_);
+            if (!sqe) throw std::runtime_error("snapshot io_uring submission queue exhausted");
+            ::io_uring_prep_read(sqe, fd_, buffer_.get() + offset, static_cast<unsigned>(aligned), next_offset_ + offset);
+            ::io_uring_sqe_set_data64(sqe, requests);
+            expected[requests++] = count;
+        }
+        unsigned submitted = 0;
+        while (submitted < requests) {
+            const int result = ::io_uring_submit(&ring_);
+            if (result == -EINTR) continue;
+            if (result < 0) throw io_error("submit snapshot io_uring reads", -result);
+            if (result == 0) throw std::runtime_error("snapshot io_uring submission made no progress");
+            submitted += static_cast<unsigned>(result);
+            pending_ += static_cast<unsigned>(result);
+        }
+        std::array<bool, direct_queue_depth> completed{};
+        while (pending_ != 0) {
+            io_uring_cqe * cqe = nullptr;
+            const int result = ::io_uring_wait_cqe(&ring_, &cqe);
+            if (result == -EINTR) continue;
+            if (result < 0) throw io_error("wait for snapshot io_uring read", -result);
+            const uint64_t index = ::io_uring_cqe_get_data64(cqe);
+            const int count = cqe->res;
+            ::io_uring_cqe_seen(&ring_, cqe);
+            --pending_;
+            if (count < 0) throw io_error("io_uring O_DIRECT snapshot read", -count);
+            if (index >= requests || completed[index]) throw std::runtime_error("unexpected snapshot io_uring completion");
+            // Only the final aligned read may be short, by exactly its EOF padding.
+            if (static_cast<size_t>(count) != expected[index]) throw std::runtime_error("short or changed direct-I/O snapshot");
+            completed[index] = true;
+        }
+        next_offset_ += bytes;
+        available_ = bytes;
+        cursor_ = 0;
+    }
+
+    int fd_;
+    uint64_t file_size_;
+    uint64_t next_offset_ = 0;
+    size_t capacity_ = 0;
+    size_t available_ = 0;
+    size_t cursor_ = 0;
+    unsigned pending_ = 0;
+    std::unique_ptr<uint8_t, decltype(&std::free)> buffer_{nullptr, &std::free};
+    io_uring ring_{};
+};
+
 inline void write_all(int fd, const uint8_t * data, size_t size) {
     while (size != 0) {
         const ssize_t n = ::write(fd, data, std::min<size_t>(size, 1U << 20));
@@ -365,11 +474,15 @@ inline void write_record(int fd, const Snapshot & snapshot, uint64_t size) {
 
 inline LookupResult read_record(int fd, const Identity & expected, const Limits & limits) {
     struct stat st{};
-    if (::fstat(fd, &st) != 0) throw io_error("stat buffered-file snapshot");
+    if (::fstat(fd, &st) != 0) throw io_error("stat direct-I/O snapshot");
     check_file(st);
-    if (static_cast<uint64_t>(st.st_size) < header_bytes) throw std::runtime_error("truncated snapshot header");
+    const uint64_t file_size = static_cast<uint64_t>(st.st_size);
+    if (file_size < header_bytes) throw std::runtime_error("truncated snapshot header");
+    if (file_size > limits.max_blob_bytes) throw std::length_error("snapshot exceeds max_blob_bytes");
+    check_quota(0, file_size, limits);
+    DirectReader reader(fd, file_size);
     std::array<uint8_t, header_bytes> header{};
-    read_all(fd, header.data(), header.size());
+    reader.read_all(header.data(), header.size());
     if (!std::equal(magic.begin(), magic.end(), header.begin())) throw std::runtime_error("invalid snapshot magic");
     if (get_le(header.data() + 8, 4) != 1) throw std::runtime_error("unsupported snapshot version");
     if (get_le(header.data() + 12, 4) != header_bytes) throw std::runtime_error("invalid snapshot header size");
@@ -390,12 +503,12 @@ inline LookupResult read_record(int fd, const Identity & expected, const Limits 
     Crc64 crc;
     crc.update(header.data(), 56);
     auto * configuration = reinterpret_cast<uint8_t *>(snapshot->identity.configuration.data());
-    read_all(fd, configuration, static_cast<size_t>(configuration_size));
+    reader.read_all(configuration, static_cast<size_t>(configuration_size));
     crc.update(configuration, static_cast<size_t>(configuration_size));
     std::array<uint8_t, 4096> token_bytes{};
     for (size_t start = 0; start < token_count;) {
         const size_t count = std::min(token_bytes.size() / 4, static_cast<size_t>(token_count) - start);
-        read_all(fd, token_bytes.data(), count * 4);
+        reader.read_all(token_bytes.data(), count * 4);
         crc.update(token_bytes.data(), count * 4);
         for (size_t i = 0; i < count; ++i) {
             const uint64_t bits = get_le(token_bytes.data() + i * 4, 4);
@@ -407,7 +520,7 @@ inline LookupResult read_record(int fd, const Identity & expected, const Limits 
     const bool compatible = snapshot->identity == expected;
     if (compatible) {
         snapshot->state.resize(static_cast<size_t>(state_size));
-        read_all(fd, snapshot->state.data(), snapshot->state.size());
+        reader.read_all(snapshot->state.data(), snapshot->state.size());
         crc.update(snapshot->state.data(), snapshot->state.size());
     } else {
         // Validate checksum even on identity mismatch, without allocating a huge unused state.
@@ -415,19 +528,15 @@ inline LookupResult read_record(int fd, const Identity & expected, const Limits 
         uint64_t remaining = state_size;
         while (remaining != 0) {
             const size_t count = static_cast<size_t>(std::min<uint64_t>(remaining, chunk.size()));
-            read_all(fd, chunk.data(), count);
+            reader.read_all(chunk.data(), count);
             crc.update(chunk.data(), count);
             remaining -= count;
         }
     }
-    uint8_t extra = 0;
-    ssize_t n;
-    do { n = ::read(fd, &extra, 1); } while (n < 0 && errno == EINTR);
-    if (n < 0) throw io_error("check snapshot EOF");
-    if (n != 0) throw std::runtime_error("trailing snapshot data");
+    reader.finish();
     if (crc.value() != get_le(header.data() + 56, 8)) throw std::runtime_error("snapshot CRC64 mismatch");
     if (!compatible) return {LookupStatus::incompatible, nullptr, "exact configuration/token/boundary mismatch"};
-    return {LookupStatus::hit, std::move(snapshot), "buffered-file hit (OS page cache may satisfy reads)"};
+    return {LookupStatus::hit, std::move(snapshot), "io-uring-direct hit (O_DIRECT; includes allocation/copy/CRC)"};
 }
 
 } // namespace detail
@@ -461,13 +570,13 @@ private:
     std::unordered_map<std::string, std::shared_ptr<const Snapshot>> entries_;
 };
 
-class BufferedFileStore {
+class DirectFileStore {
 public:
     // Roots must be private (0700) and owned by this uid. Missing components are
     // created as 0700; existing directories/files are never chmod'ed or removed.
     // max_blob_bytes bounds the entire encoded record. max_store_bytes counts
     // encoded bytes, including incomplete staging files. Not an RSS quota.
-    explicit BufferedFileStore(const std::filesystem::path & root, Limits limits)
+    explicit DirectFileStore(const std::filesystem::path & root, Limits limits)
         : limits_(detail::valid_limits(limits)), root_(detail::open_root(root)) {}
 
     void put(const std::string & key, Snapshot snapshot) {
@@ -493,10 +602,10 @@ public:
         detail::valid_key(key);
         const std::string name = key + ".qcache";
         // NONBLOCK prevents a planted FIFO from blocking before fstat rejects it.
-        detail::Fd fd(::openat(root_.get(), name.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC));
+        detail::Fd fd(::openat(root_.get(), name.c_str(), O_RDONLY | O_DIRECT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC));
         if (fd.get() < 0) {
-            if (errno == ENOENT) return {LookupStatus::miss, nullptr, "buffered-file key not found"};
-            return {LookupStatus::corrupt, nullptr, detail::io_error("open buffered-file snapshot").what()};
+            if (errno == ENOENT) return {LookupStatus::miss, nullptr, "io-uring-direct key not found"};
+            return {LookupStatus::corrupt, nullptr, detail::io_error("open O_DIRECT snapshot (no buffered fallback)").what()};
         }
         try {
             return detail::read_record(fd.get(), expected, limits_);
